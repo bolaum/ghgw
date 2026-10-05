@@ -92,7 +92,7 @@ cmd/ghgw/            cobra commands (serve, admin commands, setup, credential, d
 internal/core/       domain and decisions; no HTTP; testable on its own
 internal/gateway/    git and REST proxies; calls core
 internal/adminapi/   thin HTTP handlers over core
-internal/store/      SQLite (modernc.org/sqlite: pure Go, no cgo)
+internal/store/      state directory: SQLite (modernc.org/sqlite: pure Go, no cgo), master key, sealed credentials
 internal/setup/      client side: git and gh configuration, undo, doctor
 pkg/api/             request/response types shared by the admin API and its clients
 pkg/adminclient/     Go client of the admin API (used by the CLI; later the MCP server)
@@ -110,8 +110,10 @@ The ghgw key is accepted as:
 - HTTP Basic password (git, through the `ghgw credential` helper; the username is ignored),
 - `Authorization: token <key>` or `Bearer <key>` (`gh`).
 
-Keys look like `ghgw_<random>` and are stored as SHA-256 hashes. A missing or unknown key gets a
-401 that names `ghgw setup` (section 8).
+Keys are `ghgw_` and 64 lowercase hex characters (256 random bits) and are stored only as SHA-256
+hashes: a key is shown once, when it is created or rotated. A key is looked up by the first 8
+bytes of its hash and then compared in full in constant time. A missing or unknown key gets a 401
+that names `ghgw setup` (section 8).
 
 ### 5.2 git (smart HTTP)
 
@@ -237,7 +239,9 @@ the agent to use the REST API through `gh api`, with an example (section 8). Mos
 - No deny rules: only the union of grants plus the hard rules, so every decision has one readable
   reason ("allowed by grant 2 of group agents"). The number is the grant's ID, unique across the
   policy, so the admin can find and remove it; when several grants allow a request, the lowest ID
-  is cited.
+  is cited. IDs are assigned when a grant is created and never reused, so an old audit record never
+  names a newer grant.
+- A grant has at most 100 repository patterns and 100 push patterns.
 - Repository patterns are `owner/name` globs (`bolaum/*`, `acme/app`). The owner is literal, so a
   grant never reaches an owner the admin did not name. In the name, `*` matches any run of
   characters (`acme/agent-*`); `**` is rejected, and so is a name ending in `.git`. Owners and
@@ -290,8 +294,17 @@ making the request; for a push it also shows the decision on each ref.
 - One credential per owner. v0: fine-grained PAT; the admin should limit it to the repositories
   agents may use.
 - Added from stdin or a file (never as a command-line argument), verified with an API call.
-- Encrypted at rest with AES-GCM under a master key generated on first start (state directory,
-  mode 0600) or given through `GHGW_MASTER_KEY`.
+- A token is 1 to 1024 visible ASCII characters (no spaces or line breaks: it goes into an HTTP
+  header).
+- Encrypted at rest with AES-256-GCM under a master key generated on first start (state directory,
+  mode 0600) or given through `GHGW_MASTER_KEY`. The key is 32 random bytes in standard base64,
+  the same in the file and in the variable. Each encryption has a random nonce, and the owner
+  (lowercased) is authenticated with the ciphertext, so a credential copied to another owner fails
+  to decrypt instead of being sent for the wrong owner.
+- The database holds a value sealed under the master key, so a wrong key stops `ghgw serve` at
+  start with a clear error. A missing key file stops it too once the database exists: a new key
+  would only lock the existing credentials away. So does a database with credentials but no such
+  value. ghgw never replaces an existing key file.
 - The token expiry GitHub returns in the `github-authentication-token-expiration` response header
   is stored; ghgw warns in the log, in `ghgw owner list` and in `doctor` before it expires.
 - Later: GitHub App credentials (installation tokens minted per request, scoped to the repository).
@@ -321,8 +334,11 @@ ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, acm
 ### 9.1 Admin API
 
 JSON over HTTPS on the admin listener, `/admin/v1/...`, authenticated with an admin token
-(`ghgwa_<random>`). On first start `ghgw serve` creates one, stores it in the state directory
-(mode 0600) and prints it once. All admin clients (CLI now; MCP server and web UI later) use
+(`ghgwa_` and 64 lowercase hex characters, stored hashed like user keys). On first start (no
+admin token in the database) `ghgw serve` creates one, writes it to `admin-token` in the state
+directory (mode 0600), stores its hash and prints it once. If `admin-token` already exists then (left
+by an interrupted first start or an earlier database), it refuses to start rather than revive a
+token that may have been shared: the admin removes the file. All admin clients (CLI now; MCP server and web UI later) use
 `pkg/adminclient`.
 
 Resources (JSON; lists are paginated with `?cursor=`; errors are `{"error": {"code", "message"}}`):
@@ -410,8 +426,13 @@ logged with `slog` to stdout. Secrets are never logged.
 
 - Config file (YAML) plus `GHGW_*` environment overrides: listen addresses, TLS, state directory,
   retention.
-- State directory: `$XDG_STATE_HOME/ghgw/` of the service user (SQLite, master key, first admin
-  token).
+- State directory: `$XDG_STATE_HOME/ghgw/` of the service user: `ghgw.db` (SQLite, with its
+  `-wal` and `-shm` files), `master.key` and `admin-token`. ghgw creates the directory with mode
+  0700 and the files with mode 0600 from the start, and never replaces an existing file; a file left
+  partial by an interrupted first start is reported as malformed, with what to do. It refuses to
+  start when the directory or one of these files is a symbolic link, is owned by another user, or
+  gives any permission to group or others; the error names the `chmod` to run. Only the directory
+  itself is checked, not its parents.
 - Dynamic state (users, groups, grants, owners) lives in SQLite and changes through the admin API.
 
 ## 13. TLS
@@ -439,7 +460,9 @@ logged with `slog` to stdout. Secrets are never logged.
 - Logging: `log/slog`, JSON in production, text on a TTY.
 - Upstream base URLs (`https://github.com`, `https://api.github.com`) are configurable so tests can
   point them at a fake GitHub (`httptest`).
-- SQLite migrations are embedded SQL files applied in order at startup.
+- SQLite migrations are embedded SQL files (`NNNN_name.sql`, numbered from 1 without gaps) applied
+  in order at startup, in one transaction; `PRAGMA user_version` records how many are applied, and
+  a database from a newer ghgw is refused.
 
 ## 16. v0 milestones
 
