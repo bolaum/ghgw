@@ -507,4 +507,5 @@ The maintainer's answers to the questions this proposal asked:
 
 Not a preset question, noted for M8: `gh auth login --with-token` checks the token with
 `GET /api/v3/` (the API root, for the `X-OAuth-Scopes` header) and a GraphQL `viewer { login }`
-query; neither is in the table.
+query; neither is in the table. M8's `ghgw setup` writes gh's host configuration
+instead of running it (SPEC.md section 10).

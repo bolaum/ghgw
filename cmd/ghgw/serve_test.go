@@ -24,8 +24,8 @@ import (
 	"time"
 )
 
-// writeTestCert writes a self-signed certificate for 127.0.0.1 and its key to dir, and returns the
-// files and a pool that trusts the certificate.
+// writeTestCert writes a self-signed certificate for 127.0.0.1 and ghgw.test and its key to dir,
+// and returns the files and a pool that trusts the certificate.
 func writeTestCert(t *testing.T, dir string) (certFile, keyFile string, roots *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -35,6 +35,7 @@ func writeTestCert(t *testing.T, dir string) (certFile, keyFile string, roots *x
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+		DNSNames:              []string{"ghgw.test"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,

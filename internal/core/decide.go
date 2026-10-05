@@ -57,11 +57,8 @@ func denialf(format string, args ...any) *denial {
 // the first thing the agent has to change: the user, then access to the repository, then the hard
 // rules and the grants for the operation, then the owner's credential.
 func (p *Policy) Decide(r Request) Decision {
-	switch u, ok := p.users[r.User]; {
-	case !ok:
-		return deny(r, denialf("unknown user %s; ask the admin to create it", Printable(r.User)))
-	case u.Disabled:
-		return deny(r, denialf("user %s is disabled; ask the admin to enable it", Printable(r.User)))
+	if why := p.checkUser(r.User); why != nil {
+		return deny(r, why)
 	}
 	grants := p.grants[r.User]
 	var d Decision
@@ -87,6 +84,17 @@ func (p *Policy) Decide(r Request) Decision {
 		return deny(r, denialf("ghgw has no credential for owner %s; ask the admin to add one", Printable(r.Repo.Owner())))
 	}
 	return d
+}
+
+// checkUser returns why user may do nothing (unknown or disabled), or nil.
+func (p *Policy) checkUser(user string) *denial {
+	switch u, ok := p.users[user]; {
+	case !ok:
+		return denialf("unknown user %s; ask the admin to create it", Printable(user))
+	case u.Disabled:
+		return denialf("user %s is disabled; ask the admin to enable it", Printable(user))
+	}
+	return nil
 }
 
 func decideFetch(r Request, grants []*Grant) Decision {
