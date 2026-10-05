@@ -34,4 +34,12 @@ jobs:
       - run: make vet
       - run: make lint
       - run: make test
-      - run: make build
+      - name: build and check that ldflags reach the binary
+        run: |
+          make build VERSION=v0.0.0-ci COMMIT=0123abc DATE=2026-01-02T03:04:05Z
+          want='{"version":"v0.0.0-ci","commit":"0123abc","date":"2026-01-02T03:04:05Z"}'
+          got=$(bin/ghgw version --json)
+          if [ "$got" != "$want" ]; then
+            echo "bin/ghgw version --json: got $got, want $want"
+            exit 1
+          fi
