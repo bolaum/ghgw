@@ -3,7 +3,11 @@ package core
 import (
 	"fmt"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 )
 
 // testPolicy is the policy of SPEC.md section 6 plus users and grants for the other rules.
@@ -20,6 +24,7 @@ func testPolicy(t *testing.T) *Policy {
 			{Name: "lonely"},
 			{Name: "multi"},
 			{Name: "nopush"},
+			{Name: "wide"},
 		},
 		Groups: []Group{{Name: "agents", Members: []string{"rpi01-agent", "devct01-agent", "old-agent"}}},
 		Grants: []Grant{
@@ -30,6 +35,7 @@ func testPolicy(t *testing.T) *Policy {
 			grant(t, 5, "user multi", []string{"bolaum/app"}, AccessWrite, []string{"feature/*"}, PresetRead),
 			grant(t, 6, "user multi", bolaum, AccessWrite, agent, PresetNone),
 			grant(t, 7, "user nopush", bolaum, AccessWrite, nil, PresetRead),
+			grant(t, 8, "user wide", bolaum, AccessWrite, []string{"**"}, PresetPR),
 		},
 		Owners: []string{"Bolaum", "acme"},
 	}, testRESTTable(t))
@@ -108,11 +114,28 @@ func runDecideTests(t *testing.T, p *Policy, tests []decideTest) {
 			if tt.repo != "" {
 				repo = mustRepo(t, tt.repo)
 			}
-			got := summarize(p.Decide(Request{User: tt.user, Repo: repo, Op: tt.op}))
-			if !reflect.DeepEqual(got, tt.want) {
+			d := p.Decide(Request{User: tt.user, Repo: repo, Op: tt.op})
+			if got := summarize(d); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("Decide() =\n%+v\nwant\n%+v", got, tt.want)
 			}
+			checkSafeExplain(t, d)
 		})
+	}
+}
+
+// checkSafeExplain checks that explain output has exactly one line for the decision and one per
+// ref, made of printable characters only, whatever bytes the request carried.
+func checkSafeExplain(t *testing.T, d Decision) {
+	t.Helper()
+	out := d.String()
+	lines := strings.Split(out, "\n")
+	if len(lines) != 1+len(d.Refs) {
+		t.Errorf("String() has %d lines, want %d:\n%s", len(lines), 1+len(d.Refs), out)
+	}
+	for _, line := range lines {
+		if !utf8.ValidString(line) || strings.ContainsFunc(line, func(c rune) bool { return !unicode.IsPrint(c) }) {
+			t.Errorf("String() line %q has unprintable characters", line)
+		}
 	}
 }
 
@@ -390,20 +413,27 @@ func TestDecidePush(t *testing.T) {
 				deniedRef(feature, "push to branch feature/x is not allowed; allowed branches: agent/**")),
 		},
 		{
-			name: "no updates: write access check",
-			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{},
-			want: allowedBy(1, "group agents"),
-		},
-		{
-			name: "no updates: read-only access",
-			user: "reviewer", repo: "bolaum/ghgw", op: Push{},
-			want: result{Reason: "reviewer has read-only access to bolaum/ghgw; pushing needs a grant with access write"},
+			name: "no updates fails closed",
+			user: "wide", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main"},
+			want: result{Reason: "the push has no ref updates, so it cannot be checked"},
 		},
 		{
 			name: "unknown default branch",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{Updates: []RefUpdate{create(agentX)}},
-			want: deniedPush("the default branch of bolaum/ghgw is unknown, so the push cannot be checked; try again",
-				deniedRef(agentX, "the default branch of bolaum/ghgw is unknown, so the push cannot be checked; try again")),
+			want: deniedPush("the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again",
+				deniedRef(agentX, "the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again")),
+		},
+		{
+			name: "default branch that is not a branch name",
+			user: "wide", repo: "bolaum/ghgw", op: Push{DefaultBranch: " ", Updates: []RefUpdate{update(main)}},
+			want: deniedPush("the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again",
+				deniedRef(main, "the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again")),
+		},
+		{
+			name: "default branch with an invalid sequence",
+			user: "wide", repo: "bolaum/ghgw", op: Push{DefaultBranch: "a..b", Updates: []RefUpdate{update(agentX)}},
+			want: deniedPush("the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again",
+				deniedRef(agentX, "the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again")),
 		},
 		{
 			name: "no repository",
@@ -411,6 +441,191 @@ func TestDecidePush(t *testing.T) {
 			want: deniedPush("push needs a repository", deniedRef(agentX, "push needs a repository")),
 		},
 	})
+}
+
+func TestDecidePushAccess(t *testing.T) {
+	runDecideTests(t, testPolicy(t), []decideTest{
+		{
+			name: "write access",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: PushAccess{},
+			want: allowedBy(1, "group agents"),
+		},
+		{
+			name: "write access without push branches still answers yes",
+			user: "nopush", repo: "bolaum/ghgw", op: PushAccess{},
+			want: allowedBy(7, "user nopush"),
+		},
+		{
+			name: "read-only access",
+			user: "reviewer", repo: "bolaum/ghgw", op: PushAccess{},
+			want: result{Reason: "reviewer has read-only access to bolaum/ghgw; pushing needs a grant with access write"},
+		},
+		{
+			name: "repository not granted",
+			user: "rpi01-agent", repo: "acme/secret", op: PushAccess{},
+			want: result{Reason: "rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, nocred/app"},
+		},
+		{
+			name: "owner without credential",
+			user: "rpi01-agent", repo: "nocred/app", op: PushAccess{},
+			want: result{Reason: "ghgw has no credential for owner nocred; ask the admin to add one"},
+		},
+		{
+			name: "no repository",
+			user: "rpi01-agent", op: PushAccess{},
+			want: result{Reason: "push needs a repository"},
+		},
+	})
+}
+
+// TestDecidePushHardRules pushes with a grant whose push glob is "**": the hard rules and the ref
+// name rules still deny, and no grant is cited.
+func TestDecidePushHardRules(t *testing.T) {
+	const all = "; allowed branches: **"
+	denied := func(ref, reason string) result {
+		return result{Reason: reason + all, Refs: []refResult{{Ref: ref, Reason: reason + all}}}
+	}
+	notBranch := func(ref string) result {
+		return denied(ref, "pushing "+ref+" is not allowed, only branches can be pushed")
+	}
+	invalid := func(ref, why string) result {
+		return denied(ref, fmt.Sprintf("invalid ref name %q: %s", ref, why))
+	}
+	push := func(u RefUpdate) Push { return Push{DefaultBranch: "main", Updates: []RefUpdate{u}} }
+	injected := "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J"
+	bidi := "refs/heads/agent/\u202egnp.exe"
+
+	runDecideTests(t, testPolicy(t), []decideTest{
+		{name: "allowed branch", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/x")),
+			want: result{Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8,
+				Refs: []refResult{{Ref: "refs/heads/x", Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8}}}},
+		{name: "default branch", user: "wide", repo: "bolaum/ghgw", op: push(update("refs/heads/main")),
+			want: denied("refs/heads/main", "push to the default branch is not allowed")},
+		{name: "HEAD", user: "wide", repo: "bolaum/ghgw", op: push(update("HEAD")), want: notBranch("HEAD")},
+		{name: "pull request ref", user: "wide", repo: "bolaum/ghgw", op: push(update("refs/pull/1/head")),
+			want: notBranch("refs/pull/1/head")},
+		{name: "remote-tracking ref", user: "wide", repo: "bolaum/ghgw", op: push(update("refs/remotes/origin/main")),
+			want: notBranch("refs/remotes/origin/main")},
+		{name: "tag create", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/tags/v1")),
+			want: denied("refs/tags/v1", "pushing tags is not allowed")},
+		{name: "tag update", user: "wide", repo: "bolaum/ghgw", op: push(update("refs/tags/v1")),
+			want: denied("refs/tags/v1", "pushing tags is not allowed")},
+		{name: "tag delete", user: "wide", repo: "bolaum/ghgw", op: push(remove("refs/tags/v1")),
+			want: denied("refs/tags/v1", "pushing tags is not allowed")},
+		{name: "star", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/a*b")),
+			want: invalid("refs/heads/a*b", "cannot contain '*'")},
+		{name: "NUL", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/a\x00b")),
+			want: invalid("refs/heads/a\x00b", `cannot contain '\x00'`)},
+		{name: "newline", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/a\nb")),
+			want: invalid("refs/heads/a\nb", `cannot contain '\n'`)},
+		{name: "DEL", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/a\x7fb")),
+			want: invalid("refs/heads/a\x7fb", `cannot contain '\x7f'`)},
+		{name: "invalid UTF-8", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/\xff")),
+			want: invalid("refs/heads/\xff", "not valid UTF-8")},
+		{name: "hidden component", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/.hidden")),
+			want: invalid("refs/heads/.hidden", `no part between slashes can start with '.' or end with ".lock"`)},
+		{name: "lock component", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/x.lock")),
+			want: invalid("refs/heads/x.lock", `no part between slashes can start with '.' or end with ".lock"`)},
+		{name: "double slash", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/a//b")),
+			want: invalid("refs/heads/a//b", `cannot end with '/' or contain "//"`)},
+		{name: "trailing slash", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/a/")),
+			want: invalid("refs/heads/a/", `cannot end with '/' or contain "//"`)},
+		{name: "trailing dot", user: "wide", repo: "bolaum/ghgw", op: push(create("refs/heads/a.")),
+			want: invalid("refs/heads/a.", "cannot end with '.'")},
+		{name: "forged explain lines", user: "wide", repo: "bolaum/ghgw", op: push(create(injected)),
+			want: invalid(injected, `cannot contain '\n'`)},
+		{name: "invisible characters are allowed but quoted", user: "wide", repo: "bolaum/ghgw", op: push(create(bidi)),
+			want: result{Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8,
+				Refs: []refResult{{Ref: bidi, Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8}}}},
+	})
+
+	d := testPolicy(t).Decide(Request{User: "wide", Repo: mustRepo(t, "bolaum/ghgw"), Op: push(create(injected))})
+	want := `denied: invalid ref name "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": cannot contain '\n'; allowed branches: **` + "\n" +
+		`  "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": denied: invalid ref name "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": cannot contain '\n'; allowed branches: **`
+	if got := d.String(); got != want {
+		t.Errorf("String() =\n%s\nwant\n%s", got, want)
+	}
+	d = testPolicy(t).Decide(Request{User: "wide", Repo: mustRepo(t, "bolaum/ghgw"), Op: push(create(bidi))})
+	if got, want := d.String(), "allowed by grant 8 of user wide\n  \"refs/heads/agent/\\u202egnp.exe\": allowed by grant 8 of user wide"; got != want {
+		t.Errorf("String() =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestDecidePushAllOrNothing mixes an allowed and a forbidden update in both orders: the whole push
+// is denied and no ref keeps a grant.
+func TestDecidePushAllOrNothing(t *testing.T) {
+	const (
+		agentX  = "refs/heads/agent/x"
+		tag     = "refs/tags/v1"
+		tagDeny = "pushing tags is not allowed; allowed branches: agent/**"
+		another = "another ref was rejected"
+		noCred  = "ghgw has no credential for owner nocred; ask the admin to add one"
+	)
+	push := func(us ...RefUpdate) Push { return Push{DefaultBranch: "main", Updates: us} }
+	runDecideTests(t, testPolicy(t), []decideTest{
+		{name: "allowed first", user: "rpi01-agent", repo: "bolaum/ghgw", op: push(create(agentX), create(tag)),
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: agentX, Reason: another}, {Ref: tag, Reason: tagDeny}}}},
+		{name: "forbidden first", user: "rpi01-agent", repo: "bolaum/ghgw", op: push(create(tag), create(agentX)),
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: tag, Reason: tagDeny}, {Ref: agentX, Reason: another}}}},
+		{name: "allowed first, no credential", user: "rpi01-agent", repo: "nocred/app", op: push(create(agentX), create(tag)),
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: agentX, Reason: another}, {Ref: tag, Reason: tagDeny}}}},
+		{name: "forbidden first, no credential", user: "rpi01-agent", repo: "nocred/app", op: push(create(tag), create(agentX)),
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: tag, Reason: tagDeny}, {Ref: agentX, Reason: another}}}},
+		{name: "all allowed, no credential", user: "rpi01-agent", repo: "nocred/app", op: push(create(agentX), update("refs/heads/agent/y")),
+			want: result{Reason: noCred, Refs: []refResult{{Ref: agentX, Reason: noCred}, {Ref: "refs/heads/agent/y", Reason: noCred}}}},
+	})
+}
+
+// TestDecideLowestGrantID lists overlapping own and group grants out of ID order: the lowest ID
+// that allows the request is cited, for every kind of operation and for each ref.
+func TestDecideLowestGrantID(t *testing.T) {
+	p, err := NewPolicy(State{
+		Users:  []User{{Name: "u"}},
+		Groups: []Group{{Name: "g", Members: []string{"u"}}},
+		Grants: []Grant{
+			grant(t, 9, "user u", []string{"bolaum/*"}, AccessWrite, []string{"**"}, PresetPR),
+			grant(t, 5, "user u", []string{"bolaum/app"}, AccessWrite, []string{"**"}, PresetRead),
+			grant(t, 3, "group g", []string{"bolaum/app"}, AccessWrite, []string{"agent/**"}, PresetPR),
+		},
+		Owners: []string{"bolaum"},
+	}, testRESTTable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	push := func(us ...RefUpdate) Push { return Push{DefaultBranch: "main", Updates: us} }
+	runDecideTests(t, p, []decideTest{
+		{name: "fetch", user: "u", repo: "bolaum/app", op: Fetch{}, want: allowedBy(3, "group g")},
+		{name: "fetch, one grant matches", user: "u", repo: "bolaum/other", op: Fetch{}, want: allowedBy(9, "user u")},
+		{name: "push access", user: "u", repo: "bolaum/app", op: PushAccess{}, want: allowedBy(3, "group g")},
+		{name: "rest read", user: "u", repo: "bolaum/app", op: REST{Name: "pulls.list"}, want: allowedBy(3, "group g")},
+		{name: "rest pr", user: "u", repo: "bolaum/app", op: REST{Name: "pulls.create"}, want: allowedBy(3, "group g")},
+		{
+			name: "each ref", user: "u", repo: "bolaum/app",
+			op: push(create("refs/heads/feature/x"), create("refs/heads/agent/x")),
+			want: result{
+				Allowed: true,
+				Reason:  "allowed by grant 5 of user u, grant 3 of group g",
+				Refs: []refResult{
+					{Ref: "refs/heads/feature/x", Allowed: true, Reason: "allowed by grant 5 of user u", Grant: 5},
+					{Ref: "refs/heads/agent/x", Allowed: true, Reason: "allowed by grant 3 of group g", Grant: 3},
+				},
+			},
+		},
+	})
+}
+
+// TestDecideDoesNotDiscloseCredentials asks for repositories the user has no grant for: whether
+// their owner has a credential does not change the answer.
+func TestDecideDoesNotDiscloseCredentials(t *testing.T) {
+	p := testPolicy(t)
+	for _, op := range []Operation{Fetch{}, PushAccess{}, REST{Name: "pulls.list"}} {
+		withCred := p.Decide(Request{User: "rpi01-agent", Repo: mustRepo(t, "acme/secret"), Op: op})
+		withoutCred := p.Decide(Request{User: "rpi01-agent", Repo: mustRepo(t, "nocred/secret"), Op: op})
+		got := strings.Replace(withoutCred.Reason, "nocred/secret", "acme/secret", 1)
+		if withCred.Allowed || withoutCred.Allowed || got != withCred.Reason {
+			t.Errorf("%T: with a credential %q, without %q; want the same denial", op, withCred.Reason, withoutCred.Reason)
+		}
+	}
 }
 
 func TestDecideREST(t *testing.T) {
@@ -521,6 +736,37 @@ func TestDecideREST(t *testing.T) {
 		},
 	})
 
+	t.Run("hard rules override a misclassified table", func(t *testing.T) {
+		// Built by hand: NewRESTTable rejects every one of these entries.
+		table := &RESTTable{byName: map[string]RESTOperation{}}
+		for _, op := range []RESTOperation{
+			{Name: "contents.update", Method: "PUT", Path: "/repos/{owner}/{repo}/contents/{path}", Class: ClassPR},
+			{Name: "pulls.merge", Method: "PUT", Path: "/repos/{owner}/{repo}/pulls/{pull_number}/merge", Class: ClassPR},
+			{Name: "hooks.list", Method: "GET", Path: "/repos/{owner}/{repo}/hooks", Class: ClassRead},
+			{Name: "users.get", Method: "GET", Path: "/user", Class: ClassGlobal},
+		} {
+			table.byName[op.Name] = op
+		}
+		p, err := NewPolicy(State{
+			Users:  []User{{Name: "a"}},
+			Grants: []Grant{grant(t, 1, "user a", []string{"bolaum/*"}, AccessWrite, []string{"**"}, PresetPR)},
+			Owners: []string{"bolaum"},
+		}, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runDecideTests(t, p, []decideTest{
+			{name: "contents write in a preset", user: "a", repo: "bolaum/x", op: REST{Name: "contents.update"},
+				want: result{Reason: "contents.update is not allowed: " + codeChange}},
+			{name: "merge in a preset", user: "a", repo: "bolaum/x", op: REST{Name: "pulls.merge"},
+				want: result{Reason: "pulls.merge is not allowed: ghgw never merges pull requests; ask a person to merge"}},
+			{name: "administration read in a preset", user: "a", repo: "bolaum/x", op: REST{Name: "hooks.list"},
+				want: result{Reason: "hooks.list is not allowed: repository administration is not available through ghgw"}},
+			{name: "unscoped endpoint as global", user: "a", op: REST{Name: "users.get"},
+				want: result{Reason: "users.get is not allowed: only repository endpoints (repos/{owner}/{repo}/...), rate_limit and meta are available"}},
+		})
+	})
+
 	t.Run("no table", func(t *testing.T) {
 		p, err := NewPolicy(State{
 			Users:  []User{{Name: "a"}},
@@ -536,18 +782,6 @@ func TestDecideREST(t *testing.T) {
 			want: result{Reason: `unknown operation "pulls.list"; ghgw only forwards the API operations it knows`},
 		}})
 	})
-}
-
-func TestDecisionGrantIsACopy(t *testing.T) {
-	p := testPolicy(t)
-	req := Request{User: "rpi01-agent", Repo: mustRepo(t, "bolaum/ghgw"), Op: Fetch{}}
-	d := p.Decide(req)
-	other, _ := ParseRepoGlob("acme/*")
-	d.Grant.Repos[0] = other
-	d.Grant.Access = AccessRead
-	if g := p.grants["rpi01-agent"][0]; g.Repos[0].String() != "bolaum/*" || g.Access != AccessWrite {
-		t.Errorf("changing a decision's grant changed the policy: %+v", g)
-	}
 }
 
 func TestDecisionString(t *testing.T) {
@@ -593,5 +827,65 @@ func TestDecisionString(t *testing.T) {
 				t.Errorf("String() =\n%s\nwant\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPolicyImmutable changes everything a policy was built from and everything a decision
+// returns, while deciding concurrently (run with -race): decisions do not change.
+func TestPolicyImmutable(t *testing.T) {
+	s := State{
+		Users:  []User{{Name: "a"}, {Name: "b"}},
+		Groups: []Group{{Name: "g", Members: []string{"a"}}},
+		Grants: []Grant{
+			grant(t, 1, "group g", []string{"bolaum/*"}, AccessWrite, []string{"agent/**"}, PresetRead),
+			grant(t, 2, "user b", []string{"bolaum/x"}, AccessRead, nil, PresetRead),
+		},
+		Owners: []string{"bolaum"},
+	}
+	p, err := NewPolicy(s, testRESTTable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	push := Request{User: "a", Repo: mustRepo(t, "bolaum/ghgw"), Op: Push{DefaultBranch: "main", Updates: []RefUpdate{create("refs/heads/agent/x")}}}
+	fetch := Request{User: "b", Repo: mustRepo(t, "bolaum/x"), Op: Fetch{}}
+	wantPush, wantFetch := summarize(p.Decide(push)), summarize(p.Decide(fetch))
+	if !wantPush.Allowed || !wantFetch.Allowed {
+		t.Fatalf("Decide() = %+v, %+v; want both allowed", wantPush, wantFetch)
+	}
+
+	other, _ := ParseRepoGlob("acme/*")
+	feature, _ := ParseBranchGlob("feature/*")
+	s.Users[0].Disabled = true
+	s.Users[1].Name = "c"
+	s.Groups[0].Members[0] = "b"
+	s.Grants[0].Repos[0] = other
+	s.Grants[0].Push[0] = feature
+	s.Grants[0].Access = AccessRead
+	s.Grants[1].API = PresetNone
+	s.Owners[0] = "acme"
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 50 {
+				d := p.Decide(push)
+				if got := summarize(d); !reflect.DeepEqual(got, wantPush) {
+					t.Errorf("Decide(push) = %+v, want %+v", got, wantPush)
+					return
+				}
+				d.Grant.Push[0] = feature
+				d.Grant.Repos[0] = other
+				d.Refs[0].Grant.Push = nil
+				d.Refs[0].Grant.Access = AccessRead
+				if got := summarize(p.Decide(fetch)); !reflect.DeepEqual(got, wantFetch) {
+					t.Errorf("Decide(fetch) = %+v, want %+v", got, wantFetch)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if g := p.grants["a"][0]; g.Push[0].String() != "agent/**" || g.Repos[0].String() != "bolaum/*" || g.Access != AccessWrite {
+		t.Errorf("the policy's grant changed: %+v", g)
 	}
 }

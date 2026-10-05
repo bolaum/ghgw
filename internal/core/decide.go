@@ -3,7 +3,10 @@ package core
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Decision is the answer to a Request. Its reason is written for the agent that made the request
@@ -22,6 +25,8 @@ type Decision struct {
 
 // RefDecision is the decision on one ref update of a push.
 type RefDecision struct {
+	// Ref is the ref exactly as the client sent it, for identity. It may hold any bytes: never
+	// render it as is (Decision.String quotes it when needed).
 	Ref     string
 	Allowed bool
 	Reason  string
@@ -34,7 +39,7 @@ type RefDecision struct {
 func (p *Policy) Decide(r Request) Decision {
 	switch u, ok := p.users[r.User]; {
 	case !ok:
-		return deny(r, "unknown user %s; ask the admin to create it", r.User)
+		return deny(r, "unknown user %s; ask the admin to create it", printable(r.User))
 	case u.Disabled:
 		return deny(r, "user %s is disabled; ask the admin to enable it", r.User)
 	}
@@ -43,6 +48,8 @@ func (p *Policy) Decide(r Request) Decision {
 	switch op := r.Op.(type) {
 	case Fetch:
 		d = decideFetch(r, grants)
+	case PushAccess:
+		d = decidePushAccess(r, grants)
 	case Push:
 		d = decidePush(r, op, grants)
 	case REST:
@@ -64,25 +71,25 @@ func decideFetch(r Request, grants []*Grant) Decision {
 	return allow(matching[0])
 }
 
-func decidePush(r Request, push Push, grants []*Grant) Decision {
-	matching, why := matchRepo(r, grants)
+func decidePushAccess(r Request, grants []*Grant) Decision {
+	write, why := writeGrants(r, grants)
 	if why != "" {
 		return deny(r, "%s", why)
 	}
-	var write []*Grant
-	for _, g := range matching {
-		if g.Access == AccessWrite {
-			write = append(write, g)
-		}
+	return allow(write[0])
+}
+
+func decidePush(r Request, push Push, grants []*Grant) Decision {
+	write, why := writeGrants(r, grants)
+	if why != "" {
+		return deny(r, "%s", why)
 	}
-	if len(write) == 0 {
-		return deny(r, "%s has read-only access to %s; pushing needs a grant with access write", r.User, r.Repo)
-	}
+	// Both fail closed: a parser or lookup failure upstream must not become an unchecked push.
 	if len(push.Updates) == 0 {
-		return allow(write[0])
+		return deny(r, "the push has no ref updates, so it cannot be checked")
 	}
-	if push.DefaultBranch == "" {
-		return deny(r, "the default branch of %s is unknown, so the push cannot be checked; try again", r.Repo)
+	if checkRefName("refs/heads/"+push.DefaultBranch) != nil {
+		return deny(r, "the default branch of %s is unknown or invalid, so the push cannot be checked; try again", r.Repo)
 	}
 
 	branches := allowedBranches(write)
@@ -103,17 +110,38 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 		return d
 	}
 
-	var used []string
+	var used []int
+	var names []string
 	for _, rd := range d.Refs {
-		if s := rd.Grant.String(); !slices.Contains(used, s) {
-			used = append(used, s)
+		if !slices.Contains(used, rd.Grant.ID) {
+			used = append(used, rd.Grant.ID)
+			names = append(names, rd.Grant.String())
 		}
 	}
-	d.Reason = "allowed by " + strings.Join(used, ", ")
+	d.Reason = "allowed by " + strings.Join(names, ", ")
 	if len(used) == 1 {
 		d.Grant = d.Refs[0].Grant
 	}
 	return d
+}
+
+// writeGrants returns the grants with write access that match the request's repository, or why
+// there are none.
+func writeGrants(r Request, grants []*Grant) ([]*Grant, string) {
+	matching, why := matchRepo(r, grants)
+	if why != "" {
+		return nil, why
+	}
+	var write []*Grant
+	for _, g := range matching {
+		if g.Access == AccessWrite {
+			write = append(write, g)
+		}
+	}
+	if len(write) == 0 {
+		return nil, fmt.Sprintf("%s has read-only access to %s; pushing needs a grant with access write", r.User, r.Repo)
+	}
+	return write, ""
 }
 
 func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
@@ -167,7 +195,7 @@ func decideRef(u RefUpdate, defaultBranch string, write []*Grant, branches strin
 	case strings.HasPrefix(u.Ref, "refs/tags/"):
 		return deny("pushing tags is not allowed")
 	case !isBranch:
-		return deny("pushing %s is not allowed, only branches can be pushed", u.Ref)
+		return deny("pushing %s is not allowed, only branches can be pushed", printable(u.Ref))
 	// Case-insensitive on purpose: denying "MAIN" next to "main" costs nothing, and no upstream
 	// quirk can then turn it into a push to the default branch.
 	case strings.EqualFold(branch, defaultBranch) && u.Kind == DeleteRef:
@@ -183,9 +211,9 @@ func decideRef(u RefUpdate, defaultBranch string, write []*Grant, branches strin
 		}
 	}
 	if u.Kind == DeleteRef {
-		return deny("deleting branch %s is not allowed", branch)
+		return deny("deleting branch %s is not allowed", printable(branch))
 	}
-	return deny("push to branch %s is not allowed", branch)
+	return deny("push to branch %s is not allowed", printable(branch))
 }
 
 // matchRepo returns the grants that match the request's repository, or why there are none.
@@ -217,8 +245,8 @@ func allowedBranches(grants []*Grant) string {
 	var branches []string
 	for _, g := range grants {
 		for _, b := range g.Push {
-			if !slices.Contains(branches, b.String()) {
-				branches = append(branches, b.String())
+			if s := printable(b.String()); !slices.Contains(branches, s) {
+				branches = append(branches, s)
 			}
 		}
 	}
@@ -252,7 +280,7 @@ func deny(r Request, format string, args ...any) Decision {
 func (d Decision) String() string {
 	lines := []string{verdict(d.Allowed, d.Reason)}
 	for _, rd := range d.Refs {
-		lines = append(lines, "  "+rd.Ref+": "+verdict(rd.Allowed, rd.Reason))
+		lines = append(lines, "  "+printable(rd.Ref)+": "+verdict(rd.Allowed, rd.Reason))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -263,4 +291,15 @@ func verdict(allowed bool, reason string) string {
 		return reason
 	}
 	return "denied: " + reason
+}
+
+// printable returns s as is when it is valid UTF-8 made only of printable characters, and quoted
+// in Go syntax (ASCII only) otherwise. Untrusted identifiers go through it before they are
+// rendered, so they cannot add lines, terminal controls or invisible characters (bidi overrides,
+// zero-width spaces) to a reason or to explain output.
+func printable(s string) string {
+	if s != "" && utf8.ValidString(s) && !strings.ContainsFunc(s, func(c rune) bool { return !unicode.IsPrint(c) }) {
+		return s
+	}
+	return strconv.QuoteToASCII(s)
 }

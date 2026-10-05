@@ -9,7 +9,7 @@ type Request struct {
 	Op   Operation
 }
 
-// Operation is what a request does: Fetch, Push or REST.
+// Operation is what a request does: Fetch, PushAccess, Push or REST.
 type Operation interface {
 	// operation returns the name used in reasons.
 	operation() string
@@ -20,14 +20,21 @@ type Fetch struct{}
 
 func (Fetch) operation() string { return "fetch" }
 
+// PushAccess asks whether the user may push to the repository at all: write access through some
+// grant. It authorizes no ref update; the gateway uses it before the receive-pack ref
+// advertisement, and explain to answer "can this user push here?".
+type PushAccess struct{}
+
+func (PushAccess) operation() string { return "push" }
+
 // Push is a git push (receive-pack). It needs write access, and every ref update must be allowed:
 // pushes are all-or-nothing.
 type Push struct {
-	// DefaultBranch is the repository's default branch, without "refs/heads/". A push with
-	// updates and no default branch is denied: the default branch rule could not be checked.
+	// DefaultBranch is the repository's default branch, without "refs/heads/". A push is denied
+	// when it is empty or not a valid branch name: the default branch rule could not be checked.
 	DefaultBranch string
 	// Updates are the ref update commands in the order the client sent them. A push without
-	// updates checks write access only, e.g. before the receive-pack ref advertisement.
+	// updates is denied: it would authorize nothing that was checked.
 	Updates []RefUpdate
 }
 

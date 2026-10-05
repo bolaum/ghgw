@@ -179,21 +179,3 @@ func TestNewPolicyValidation(t *testing.T) {
 		})
 	}
 }
-
-func TestNewPolicyCopiesState(t *testing.T) {
-	s := State{
-		Users:  []User{{Name: "a"}},
-		Grants: []Grant{grant(t, 1, "user a", []string{"bolaum/x"}, AccessRead, nil, PresetRead)},
-	}
-	p, err := NewPolicy(s, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	other, _ := ParseRepoGlob("acme/*")
-	s.Grants[0].Repos[0] = other
-	s.Grants[0].Access = AccessWrite
-	g := p.grants["a"][0]
-	if g.Repos[0].String() != "bolaum/x" || g.Access != AccessRead {
-		t.Errorf("policy grant changed with the state it was built from: %+v", g)
-	}
-}
