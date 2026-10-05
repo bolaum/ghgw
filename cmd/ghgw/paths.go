@@ -83,3 +83,15 @@ func loadPolicy(path string) (*policyfile.File, error) {
 	pf, err := policyfile.Load(path)
 	return pf, policyErr(path, err)
 }
+
+// configPath returns the client's config file, where ghgw setup saves the gateway and the key.
+func configPath() (string, error) {
+	if base := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(base) {
+		return filepath.Join(base, "ghgw", "config.yaml"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("no home directory to keep the ghgw config in: %w; set XDG_CONFIG_HOME", err)
+	}
+	return filepath.Join(home, ".config", "ghgw", "config.yaml"), nil
+}

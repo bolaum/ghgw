@@ -33,7 +33,7 @@ func mustRun(t *testing.T, stdin string, args ...string) string {
 // testEnv isolates a test from the environment the commands read.
 func testEnv(t *testing.T) (stateDir string) {
 	t.Helper()
-	for _, env := range []string{stateDirEnv, policyEnv, masterKeyEnv, "XDG_STATE_HOME", "XDG_CONFIG_HOME"} {
+	for _, env := range []string{stateDirEnv, policyEnv, masterKeyEnv, urlEnv, tokenEnv, "XDG_STATE_HOME", "XDG_CONFIG_HOME"} {
 		t.Setenv(env, "")
 	}
 	return filepath.Join(t.TempDir(), "state")
