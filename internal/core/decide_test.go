@@ -549,3 +549,49 @@ func TestDecisionGrantIsACopy(t *testing.T) {
 		t.Errorf("changing a decision's grant changed the policy: %+v", g)
 	}
 }
+
+func TestDecisionString(t *testing.T) {
+	p := testPolicy(t)
+	bolaum := mustRepo(t, "bolaum/ghgw")
+	tests := []struct {
+		name string
+		req  Request
+		want string
+	}{
+		{
+			name: "allowed",
+			req:  Request{User: "rpi01-agent", Repo: bolaum, Op: Fetch{}},
+			want: "allowed by grant 1 of group agents",
+		},
+		{
+			name: "denied",
+			req:  Request{User: "lonely", Repo: bolaum, Op: Fetch{}},
+			want: "denied: lonely cannot access bolaum/ghgw. Repositories allowed: none",
+		},
+		{
+			name: "allowed push",
+			req: Request{User: "rpi01-agent", Repo: bolaum, Op: Push{DefaultBranch: "main", Updates: []RefUpdate{
+				create("refs/heads/agent/x"), remove("refs/heads/agent/y"),
+			}}},
+			want: "allowed by grant 1 of group agents\n" +
+				"  refs/heads/agent/x: allowed by grant 1 of group agents\n" +
+				"  refs/heads/agent/y: allowed by grant 1 of group agents",
+		},
+		{
+			name: "denied push",
+			req: Request{User: "rpi01-agent", Repo: bolaum, Op: Push{DefaultBranch: "main", Updates: []RefUpdate{
+				create("refs/heads/agent/x"), update("refs/heads/main"),
+			}}},
+			want: "denied: push to the default branch is not allowed; allowed branches: agent/**\n" +
+				"  refs/heads/agent/x: denied: another ref was rejected\n" +
+				"  refs/heads/main: denied: push to the default branch is not allowed; allowed branches: agent/**",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.Decide(tt.req).String(); got != tt.want {
+				t.Errorf("String() =\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}

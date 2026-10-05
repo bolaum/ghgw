@@ -244,3 +244,21 @@ func deny(r Request, format string, args ...any) Decision {
 	}
 	return d
 }
+
+// String renders the decision for explain: the decision and its reason, then one line per ref of
+// a push.
+func (d Decision) String() string {
+	lines := []string{verdict(d.Allowed, d.Reason)}
+	for _, rd := range d.Refs {
+		lines = append(lines, "  "+rd.Ref+": "+verdict(rd.Allowed, rd.Reason))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// verdict prefixes denials only: reasons of allowed decisions already start with "allowed".
+func verdict(allowed bool, reason string) string {
+	if allowed {
+		return reason
+	}
+	return "denied: " + reason
+}
