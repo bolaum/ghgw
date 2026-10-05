@@ -862,6 +862,41 @@ func TestDecideREST(t *testing.T) {
 		runDecideTests(t, p, decideTests)
 	})
 
+	t.Run("a path in several families is denied with the first one", func(t *testing.T) {
+		const repo = "/repos/{owner}/{repo}"
+		tests := []struct {
+			op   RESTOperation // valid: its class is one of the families it reaches
+			want Class
+		}{
+			{RESTOperation{"code-scanning.upload-sarif", "POST", repo + "/code-scanning/sarifs", ClassCIResult}, ClassCIResult},
+			{RESTOperation{"code-scanning.upload-sarif", "POST", repo + "/code-scanning/sarifs", ClassAdmin}, ClassCIResult},
+			{RESTOperation{"code-scanning.commit-autofix", "POST", repo + "/code-scanning/alerts/{alert_number}/autofix/commits", ClassCodeChange}, ClassCodeChange},
+			{RESTOperation{"code-scanning.commit-autofix", "POST", repo + "/code-scanning/alerts/{alert_number}/autofix/commits", ClassAdmin}, ClassCodeChange},
+			{RESTOperation{"pulls.action", "PUT", repo + "/pulls/{pull_number}/{action}", ClassMerge}, ClassCodeChange},
+			{RESTOperation{"pulls.action", "PUT", repo + "/pulls/{pull_number}/{action}", ClassTrigger}, ClassCodeChange},
+		}
+		for _, tt := range tests {
+			t.Run(tt.op.Name+" as "+tt.op.Class.String(), func(t *testing.T) {
+				table, err := NewRESTTable([]RESTOperation{tt.op})
+				if err != nil {
+					t.Fatal(err)
+				}
+				p, err := NewPolicy(State{
+					Users:  []User{{Name: "a"}},
+					Grants: []Grant{grant(t, 1, "user a", []string{"bolaum/*"}, AccessWrite, []string{"**"}, PresetPR)},
+					Owners: []string{"bolaum"},
+				}, table)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runDecideTests(t, p, []decideTest{{
+					name: "denied", user: "a", repo: "bolaum/x", op: REST{Name: tt.op.Name},
+					want: result{Reason: tt.op.Name + " is not allowed: " + hardRules[tt.want]},
+				}})
+			})
+		}
+	})
+
 	t.Run("no table", func(t *testing.T) {
 		p, err := NewPolicy(State{
 			Users:  []User{{Name: "a"}},

@@ -237,14 +237,13 @@ func isParam(seg string) bool {
 	return strings.HasPrefix(seg, "{")
 }
 
-// class returns the operation's class, unless a hard rule it can reach says otherwise: then the
-// first such hard rule.
+// class returns the first hard rule the operation can reach, whatever its entry says, so a path in
+// several families is always denied with the same rule; otherwise the entry's class.
 func (o RESTOperation) class() Class {
-	hard := hardRuleClasses(o.Method, o.Path)
-	if len(hard) == 0 || slices.Contains(hard, o.Class) {
-		return o.Class
+	if hard := hardRuleClasses(o.Method, o.Path); len(hard) > 0 {
+		return hard[0]
 	}
-	return hard[0]
+	return o.Class
 }
 
 func (o RESTOperation) repoScoped() bool {
