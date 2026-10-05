@@ -127,10 +127,14 @@ command is not allowed:
 
 | Update | Rule |
 |---|---|
-| Branch create or update | Branch must match one of the grant's `push` globs. |
+| Branch create or update | Branch must match a `push` glob of an effective grant with `access: write` for the repository. |
 | Branch delete | Same glob rule (agents may clean up their own branches). |
-| Default branch | Never, whatever the grants say (hard rule). |
+| Default branch | Never, whatever the grants say (hard rule). Compared case-insensitively. |
 | Tags | Never in v0 (hard rule). |
+| Other refs (`refs/notes/...`, anything outside `refs/heads/`) | Never in v0 (hard rule). |
+| Invalid ref names (`git check-ref-format`) | Never. |
+
+If the default branch cannot be looked up, the push is rejected: the hard rule cannot be checked.
 
 A rejected push is answered by ghgw itself with a receive-pack report (`ng <ref> <reason>`, in the
 sideband when negotiated) and nothing reaches GitHub. Pushes are all-or-nothing: if one ref is
@@ -155,6 +159,8 @@ API presets:
 | `read` | `GET` on repository endpoints: contents, commits, branches, pulls, issues, comments, reviews, checks, Actions runs/jobs/logs, releases. |
 | `pr` | `read` plus: create and update pull requests, pull request reviews and review comments, issues and issue comments, labels on issues and pulls, re-run of Actions jobs. |
 
+A grant's `api` is `read`, `pr`, or omitted (no REST operation); `pr` includes `read`.
+
 Always denied in v0 (hard rules):
 
 - Code changes outside git push: contents writes, git data writes (`/git/refs`, trees, commits).
@@ -166,6 +172,10 @@ Always denied in v0 (hard rules):
   `GET /rate_limit` and `GET /meta`.
 
 The exact operation table lives in code (`internal/core`), with tests, and in `docs/operations.md`.
+Each entry has a name, a method, a path template and exactly one class: `read` or `pr` (allowed by
+that preset), `global` (`GET /rate_limit`, `GET /meta`: allowed for every enabled user, no grant
+needed), or one of the hard rules above (always denied, with that rule as the reason). A hard-rule
+operation therefore cannot end up in a preset, and `read` and `global` entries must be `GET`.
 
 ### 5.4 GraphQL
 
@@ -183,8 +193,21 @@ the agent to use the REST API through `gh api`, with an example (section 8). Mos
 
 - Deny by default. Effective grants = the user's own grants plus those of all its groups.
 - No deny rules: only the union of grants plus the hard rules, so every decision has one readable
-  reason ("allowed by grant 2 of group agents").
-- Repository patterns are `owner/name` globs (`bolaum/*`, `acme/app`).
+  reason ("allowed by grant 2 of group agents"). The number is the grant's ID, unique across the
+  policy, so the admin can find and remove it; when several grants allow a request, the lowest ID
+  is cited.
+- Repository patterns are `owner/name` globs (`bolaum/*`, `acme/app`). The owner is literal, so a
+  grant never reaches an owner the admin did not name. In the name, `*` matches any run of
+  characters (`acme/agent-*`); `**` is rejected. Owners and names match case-insensitively, like
+  GitHub.
+- Branch globs (`push`) follow GitHub's branch filter patterns and match branch names without
+  `refs/heads/`: `*` matches any run of characters except `/`, `**` also matches `/`
+  (`agent/**` matches `agent/x` and `agent/x/y`, not `agent`). They are case-sensitive, like git
+  refs. A glob that is not a valid branch name once its stars are removed is rejected.
+- `access` governs git and `api` governs REST, independently: a review agent can have
+  `access: read` and `api: pr`. `push` globs require `access: write`.
+- User and group names are lowercase (`[a-z0-9][a-z0-9._-]*`, up to 64 characters). A disabled user
+  is denied everything.
 
 ```yaml
 groups:
@@ -193,7 +216,7 @@ groups:
       - repos: ["bolaum/*"]
         access: write        # read | write
         push: ["agent/**"]   # branch globs; empty = no push
-        api: pr              # read | pr
+        api: pr              # read | pr; omitted = no REST
 
 users:
   rpi01-agent:
@@ -208,8 +231,11 @@ users:
 ```
 
 A request is allowed when some effective grant matches the repository and allows the operation,
-the owner has a credential, and no hard rule denies it. `ghgw explain` shows the decision and its
-reason without making the request.
+the owner has a credential, and no hard rule denies it. Checks run from the most fundamental to the
+most specific, and the reason is the first one that fails, so it names the first thing to change:
+the user (unknown, disabled), access to the repository, the hard rules and the grants for the
+operation, then the owner's credential. `ghgw explain` shows the decision and its reason without
+making the request; for a push it also shows the decision on each ref.
 
 ## 7. Credentials
 
@@ -394,6 +420,9 @@ pass in CI.
 ## 18. Open questions
 
 - The exact REST operation table for the `read` and `pr` presets (milestone M6).
+- Which credential `GET /rate_limit` uses: the path names no owner (milestone M7).
+- How `ghgw explain` gets the default branch for a push: looked up like the gateway does, or given
+  as a flag (milestone M3).
 - Whether agents get a read-only view of their own access beyond `whoami` (e.g. `ghgw whoami` in
   `doctor` output is enough?).
 - Several admins with their own tokens, or one admin token in v0.
