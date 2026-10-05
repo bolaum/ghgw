@@ -20,6 +20,9 @@ type Decision struct {
 	// Refs has one entry per ref update of a push, in order: the lines of the receive-pack report.
 	// A push over MaxRefUpdates is rejected as a whole and has none.
 	Refs []RefDecision
+	// Operation is the REST operation a RESTRequest was classified as, allowed or not; empty when
+	// it matched none or was denied before the table was consulted.
+	Operation string
 }
 
 // RefDecision is the decision on one ref update of a push.
@@ -70,7 +73,13 @@ func (p *Policy) Decide(r Request) Decision {
 	case Push:
 		d = decidePush(r, op, grants)
 	case REST:
-		d = p.decideREST(r, op, grants)
+		if rest, ok := p.rest.lookup(op.Name); ok {
+			d = p.decideOperation(r, rest, grants)
+		} else {
+			d = deny(r, denialf("unknown operation %s; ghgw only forwards the API operations it knows", Printable(op.Name)))
+		}
+	case RESTRequest:
+		d = p.decideRESTRequest(r, op, grants)
 	default:
 		return deny(r, denialf("unknown operation"))
 	}
@@ -144,11 +153,8 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 	return d
 }
 
-func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
-	op, ok := p.rest.lookup(call.Name)
-	if !ok {
-		return deny(r, denialf("unknown operation %s; ghgw only forwards the API operations it knows", Printable(call.Name)))
-	}
+// decideOperation decides a REST operation of the table.
+func (p *Policy) decideOperation(r Request, op RESTOperation, grants []*Grant) Decision {
 	// The class is recomputed so a misclassified entry still cannot allow a hard-rule operation.
 	class := op.class()
 	name := Printable(op.Name)
