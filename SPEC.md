@@ -139,13 +139,17 @@ command is not allowed:
 If the default branch cannot be looked up or is not a valid branch name, the push is rejected: the
 hard rule cannot be checked. A push without ref update commands is rejected too, and so is a push
 with more than 1000 ref updates or with a ref name longer than 1024 bytes; transports enforce these
-limits while parsing, before holding the commands in memory. Refs and other names from the request
-are quoted when they contain anything but printable characters, wherever they are shown (reasons,
-`ng` lines, `explain`), and cut beyond 1024 bytes.
+limits while parsing, before holding the commands in memory. A push over 1000 updates is rejected as
+a whole, without a result per ref, whatever else is wrong with it. Refs and other names from the
+request or from policy input go through one renderer before they are shown anywhere (reasons,
+errors, `ng` lines, `explain`): quoted when they contain anything but printable characters, and cut
+beyond 1024 bytes.
 
 A rejected push is answered by ghgw itself with a receive-pack report (`ng <ref> <reason>`, in the
 sideband when negotiated) and nothing reaches GitHub. Pushes are all-or-nothing: if one ref is
-rejected, the others are reported as `ng ... (another ref was rejected)`.
+rejected, the others are reported as `ng ... (another ref was rejected)`. Each ref gets a short
+reason of its own; the guidance (allowed branches) is part of the push's reason, once, so the report
+stays small whatever the policy holds.
 
 Force pushes to allowed branches are allowed in v0 (agents rebase their own branches). The default
 branch is looked up through the REST API and cached for a few minutes.
@@ -194,8 +198,12 @@ families that do not depend on the table: an entry that falls in a family must h
 class (the table is rejected otherwise), and a request is denied by the family's rule whatever its
 entry says. Path templates must be canonical (segments of lowercase letters, digits, `-` and `_`,
 or whole-segment `{parameters}`; no escapes, dots, backslashes or delimiters), so a family cannot be
-dodged by spelling. The families, on paths under `/repos/{owner}/{repo}` ("writes" means any method
-but `GET`):
+dodged by spelling. Parameters cannot hide a family either: the segment after
+`/repos/{owner}/{repo}` is always literal, a parameter stands for any one segment, and a `read`,
+`pr` or `global` template is rejected when some value of its parameters reaches a family
+(`pulls/{n}/{action}` reaches the merge rule). The REST proxy (M7) checks the families again on the
+concrete method and path of each request. The families, on paths under `/repos/{owner}/{repo}`
+("writes" means any method but `GET`):
 
 | Hard rule | Family |
 |---|---|
@@ -204,7 +212,7 @@ but `GET`):
 | Release | Writes under `releases/` (assets included). |
 | CI result | Writes under `statuses/`, `check-runs/` and `check-suites/`. |
 | Trigger | Writes to `dispatches` and `actions/workflows/{id}/dispatches`; writes under `deployments/`. |
-| Administration | Writes to the repository itself, `transfer`, `forks` and under `topics/`; writes to `branches/{branch}/rename`. Every method under `collaborators`, `invitations`, `hooks`, `keys`, `environments`, `rulesets`, `pages`, `autolinks`, `vulnerability-alerts`, `automated-security-fixes`, `private-vulnerability-reporting`, `actions/permissions`, `actions/runners`, `actions/runner-groups`, `actions/oidc`, `actions/cache` and `actions/caches`, on any `secrets`, `variables`, `organization-secrets` or `organization-variables` segment, and on `branches/{branch}/protection`. |
+| Administration | Writes to the repository itself, `transfer`, `forks` and under `topics/`; writes to `branches/{branch}/rename`. Every method under `collaborators`, `invitations`, `hooks`, `keys`, `environments`, `rulesets`, `pages`, `autolinks`, `vulnerability-alerts`, `automated-security-fixes`, `private-vulnerability-reporting`, `actions/permissions`, `actions/runners`, `actions/runner-groups`, `actions/oidc`, `actions/cache`, `actions/caches`, `actions/secrets`, `actions/variables`, `actions/organization-secrets`, `actions/organization-variables`, `dependabot/secrets` and `codespaces/secrets` (environment secrets and variables are under `environments`), and on `branches/{branch}/protection`. |
 | Not repository-scoped | Every path outside `/repos/{owner}/{repo}` except `GET /rate_limit` and `GET /meta`. |
 
 The families are a backstop for the table, not a complete list of dangerous endpoints: anything
@@ -289,7 +297,8 @@ making the request; for a push it also shows the decision on each ref.
 ## 8. Errors guide the next step
 
 Every denial says what was denied, why, and what would work. The agent reads the message and
-adjusts; no agent-side rules are needed.
+adjusts; no agent-side rules are needed. Lists in messages (allowed repositories, branches, grants)
+are cut at 1 KiB and end with "and N more".
 
 ```
 ! [remote rejected] main -> main (ghgw: push to the default branch is not allowed; allowed branches: agent/**)
