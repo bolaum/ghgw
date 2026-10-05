@@ -128,10 +128,6 @@ func (c *commandList) add(line []byte) error {
 		}
 		var caps []byte
 		line, caps, _ = bytes.Cut(line, []byte{0})
-		if string(line) == "push-cert" {
-			// git would read the commands from the certificate.
-			return &protocolError{"signed pushes are not supported; push without --signed"}
-		}
 		c.capsKnown = true
 		for _, cap := range strings.Fields(string(caps)) {
 			switch cap {
@@ -140,6 +136,10 @@ func (c *commandList) add(line []byte) error {
 			case "side-band-64k":
 				c.sideband = true
 			}
+		}
+		if string(line) == "push-cert" {
+			// git would read the commands from the certificate.
+			return &protocolError{"signed pushes are not supported; push without --signed"}
 		}
 	}
 	if len(c.updates) == core.MaxRefUpdates {

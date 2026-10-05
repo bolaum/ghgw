@@ -125,10 +125,6 @@ func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "%s", d.Reason)
 		return
 	}
-	if q.service == receivePack {
-		fail(w, http.StatusNotImplemented, "this gateway does not accept pushes yet; ask the admin")
-		return
-	}
 	token, err := g.store.Credential(r.Context(), q.repo.Owner())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -138,6 +134,10 @@ func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		g.log.Error("cannot read a credential", "owner", q.repo.Owner(), "error", err)
 		fail(w, http.StatusInternalServerError, "the gateway cannot use the credential of owner %s; ask the admin to check the gateway's log", core.Printable(q.repo.Owner()))
+		return
+	}
+	if q.service == receivePack && !q.advertisement {
+		g.push(w, r, q, snap, user, token)
 		return
 	}
 	g.forward(w, r, q, user, token)
@@ -210,7 +210,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, q gitRequest, 
 	target.Path = "/" + q.repo.String() + ".git/" + q.suffix()
 	if q.advertisement {
 		target.RawQuery = "service=" + q.service
-	} else {
+	} else if q.service == uploadPack {
 		if r.ContentLength > g.limits.uploadPackBody {
 			bodyTooLarge(w, g.limits.uploadPackBody)
 			return

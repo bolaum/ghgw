@@ -86,7 +86,7 @@ func TestReadCommandList(t *testing.T) {
 		{name: "shallow line after a command", list: pkt(oldID+" "+newID+" refs/heads/a") + pkt("shallow "+oldID) + "0000", wantErr: errMalformed.reason},
 		{name: "bad shallow line", list: pkt("shallow x") + "0000", wantErr: errMalformed.reason},
 		{name: "signed push", list: pkt("push-cert\x00report-status side-band-64k") + pkt("certificate version 0.1\n") + "0000",
-			wantErr: "signed pushes are not supported; push without --signed"},
+			wantErr: "signed pushes are not supported; push without --signed", wantReport: true, wantSideband: true},
 		{name: "ref too long", list: pkt(oldID+" "+newID+" "+longRef+"x") + "0000",
 			wantErr: "the push has a ref name longer than the 1024 bytes allowed; use a shorter name"},
 		{name: "1000 updates", list: many + "0000", wantReport: true, wantSideband: true},

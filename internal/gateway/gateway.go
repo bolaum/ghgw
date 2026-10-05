@@ -31,6 +31,9 @@ type Config struct {
 	// GitURL is the base URL git requests are forwarded to: DefaultGitURL, or a fake GitHub in
 	// tests. It must be https: the owner's credential travels with every request.
 	GitURL string
+	// APIURL is the base URL of GitHub's REST API, where the default branch of a repository is
+	// looked up for push checks: DefaultAPIURL, or a fake GitHub in tests. https only too.
+	APIURL string
 	// RootCAs verifies the upstream's certificate; nil means the system roots.
 	RootCAs *x509.CertPool
 	Logger  *slog.Logger
@@ -50,6 +53,8 @@ type limits struct {
 	uploadPackBody int64
 	// dial, tlsHandshake and responseHeader bound the upstream's steps before the body.
 	dial, tlsHandshake, responseHeader time.Duration
+	// lookup bounds looking a default branch up, and branchTTL is how long the answer is used.
+	lookup, branchTTL time.Duration
 }
 
 var defaultLimits = limits{
@@ -59,6 +64,8 @@ var defaultLimits = limits{
 	dial:           10 * time.Second,
 	tlsHandshake:   10 * time.Second,
 	responseHeader: 2 * time.Minute,
+	lookup:         10 * time.Second,
+	branchTTL:      5 * time.Minute,
 }
 
 // maxHeaderBytes bounds the header block of a request and of an upstream answer.
@@ -69,7 +76,9 @@ type Gateway struct {
 	policy    *policySource
 	store     *store.Store
 	gitURL    *url.URL
+	apiURL    *url.URL
 	transport *http.Transport
+	branches  branchCache
 	log       *slog.Logger
 	limits    limits
 }
@@ -81,6 +90,10 @@ func New(ctx context.Context, cfg Config) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	apiURL, err := parseUpstream(cfg.APIURL)
+	if err != nil {
+		return nil, err
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -89,6 +102,7 @@ func New(ctx context.Context, cfg Config) (*Gateway, error) {
 		policy: &policySource{path: cfg.PolicyPath, store: cfg.Store, log: log},
 		store:  cfg.Store,
 		gitURL: gitURL,
+		apiURL: apiURL,
 		log:    log,
 		limits: defaultLimits,
 	}

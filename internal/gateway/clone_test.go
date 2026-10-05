@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"crypto/rand"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cgi"
@@ -75,6 +77,21 @@ func (g gitEnv) mustRun(t *testing.T, dir string, args ...string) string {
 	return out
 }
 
+// startTLS serves the gateway over TLS, as git needs, with a certificate g trusts, and HTTP/2 when
+// h2 is set.
+func startTLS(t *testing.T, e *testEnv, g gitEnv, h2 bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(e.gw)
+	srv.EnableHTTP2 = h2
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(g.caFile, pemCert, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return srv
+}
+
 // TestGitClone clones and fetches through the gateway with real git (SPEC.md section 16, M4).
 func TestGitClone(t *testing.T) {
 	e := newTestEnv(t)
@@ -100,14 +117,7 @@ func TestGitClone(t *testing.T) {
 	commit("first")
 	e.upstream.set(gitHTTP(t, root))
 
-	// The gateway over TLS, as git needs, with a certificate git is told to trust.
-	srv := httptest.NewUnstartedServer(e.gw)
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
-	if err := os.WriteFile(g.caFile, pemCert, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	srv := startTLS(t, e, g, false)
 	gateway := strings.Replace(srv.URL, "https://", "https://x:"+e.keys["rpi01-agent"]+"@", 1)
 
 	for _, version := range []string{"0", "1", "2"} {
@@ -149,4 +159,121 @@ func TestGitClone(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestGitPush pushes through the gateway with real git (SPEC.md section 16, M5): allowed branches
+// reach the upstream, and rejected pushes get git's report and change nothing there.
+func TestGitPush(t *testing.T) {
+	e := newTestEnv(t)
+	dir := t.TempDir()
+	root := filepath.Join(dir, "github")
+	g := gitEnv{home: dir, caFile: filepath.Join(dir, "gateway.pem")}
+
+	bare := filepath.Join(root, "bolaum", "pushable.git")
+	g.mustRun(t, dir, "init", "-q", "--bare", "-b", "main", bare)
+	g.mustRun(t, bare, "config", "http.receivepack", "true")
+	work := filepath.Join(dir, "work")
+	g.mustRun(t, dir, "init", "-q", "-b", "main", work)
+	g.mustRun(t, work, "commit", "-q", "--allow-empty", "-m", "first")
+	g.mustRun(t, work, "push", "-q", bare, "main")
+	first := g.mustRun(t, work, "rev-parse", "HEAD")
+	g.mustRun(t, work, "commit", "-q", "--allow-empty", "-m", "second")
+	g.mustRun(t, work, "tag", "v1")
+	second := g.mustRun(t, work, "rev-parse", "HEAD")
+	// A pack larger than git's http.postBuffer is sent chunked, while the gateway answers.
+	g.mustRun(t, work, "switch", "-q", "-c", "big")
+	big := make([]byte, 4<<20)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "big"), big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g.mustRun(t, work, "add", "big")
+	g.mustRun(t, work, "commit", "-q", "-m", "big")
+	g.mustRun(t, work, "switch", "-q", "main")
+
+	git := gitHTTP(t, root)
+	e.upstream.set(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			apiAnswer(w, r)
+			return
+		}
+		git(w, r)
+	})
+	upstreamRef := func(ref string) string {
+		out, _ := g.run(t, bare, "rev-parse", "-q", "--verify", ref)
+		return out
+	}
+	for _, h2 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("http2 %v", h2), func(t *testing.T) {
+			srv := startTLS(t, e, g, h2)
+			remote := strings.Replace(srv.URL, "https://", "https://x:"+e.keys["rpi01-agent"]+"@", 1) + "/bolaum/pushable.git"
+			testGitPush(t, e, g, remote, upstreamRef, first, second)
+		})
+	}
+}
+
+func testGitPush(t *testing.T, e *testEnv, g gitEnv, remote string, upstreamRef func(string) string, first, second string) {
+	work := filepath.Join(g.home, "work")
+
+	for _, version := range []string{"0", "1", "2"} {
+		t.Run("allowed, protocol "+version, func(t *testing.T) {
+			branch := "agent/v" + version
+			g.mustRun(t, work, "-c", "protocol.version="+version, "push", "-q", remote, "HEAD:"+branch)
+			if got := upstreamRef(branch); got != second {
+				t.Errorf("upstream %s = %q, want %q", branch, got, second)
+			}
+			g.mustRun(t, work, "-c", "protocol.version="+version, "push", "-q", remote, ":"+branch)
+			if got := upstreamRef(branch); got != "" {
+				t.Errorf("upstream %s = %q, want it deleted", branch, got)
+			}
+		})
+	}
+
+	const guidance = "; allowed branches: agent/**)"
+	tests := []struct {
+		name string
+		refs []string
+		want []string
+	}{
+		{name: "default branch", refs: []string{"main"},
+			want: []string{" ! [remote rejected] main -> main (ghgw: push to the default branch is not allowed" + guidance}},
+		{name: "tag", refs: []string{"v1"},
+			want: []string{" ! [remote rejected] v1 -> v1 (ghgw: pushing tags is not allowed" + guidance}},
+		{name: "large pack", refs: []string{"big:main"},
+			want: []string{" ! [remote rejected] big -> main (ghgw: push to the default branch is not allowed" + guidance}},
+		{name: "other branch", refs: []string{"HEAD:feature"},
+			want: []string{" ! [remote rejected] HEAD -> feature (ghgw: push to branch feature is not allowed" + guidance}},
+		{name: "allowed with a rejected one", refs: []string{"HEAD:agent/x", "main"},
+			want: []string{
+				" ! [remote rejected] HEAD -> agent/x (ghgw: another ref was rejected)",
+				" ! [remote rejected] main -> main (ghgw: push to the default branch is not allowed" + guidance,
+			}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e.upstream.reset()
+			out, err := g.run(t, work, append([]string{"push", remote}, tt.refs...)...)
+			if err == nil {
+				t.Fatalf("git push succeeded, want it rejected:\n%s", out)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("git push said\n%s\nwant %q", out, want)
+				}
+			}
+			if pushes := e.upstream.receivePacks(); len(pushes) != 0 {
+				t.Errorf("the upstream got %d pushes, want none", len(pushes))
+			}
+			if got := upstreamRef("main"); got != first {
+				t.Errorf("upstream main = %q, want it unchanged", got)
+			}
+			for _, ref := range []string{"agent/x", "feature", "v1", "big"} {
+				if got := upstreamRef(ref); got != "" {
+					t.Errorf("upstream %s = %q, want none", ref, got)
+				}
+			}
+		})
+	}
 }

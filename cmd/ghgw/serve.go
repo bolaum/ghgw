@@ -15,20 +15,22 @@ import (
 
 type serveOptions struct {
 	listen, certFile, keyFile, policy, stateDir string
-	// gitURL and rootCAs are where git requests go: GitHub, or a fake GitHub in tests.
-	gitURL  string
-	rootCAs *x509.CertPool
+	// gitURL, apiURL and rootCAs are where git requests and default branch lookups go: GitHub,
+	// or a fake GitHub in tests.
+	gitURL, apiURL string
+	rootCAs        *x509.CertPool
 }
 
 func newServeCmd() *cobra.Command {
-	o := serveOptions{gitURL: gateway.DefaultGitURL}
+	o := serveOptions{gitURL: gateway.DefaultGitURL, apiURL: gateway.DefaultAPIURL}
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the gateway",
-		Long: "Run the gateway listener: git fetch and clone through ghgw, for the users of the policy\n" +
-			"file and with the credentials of the owners in the local store. The policy file is read\n" +
-			"again when it changes, and so are the TLS certificate and key files; owners added or\n" +
-			"removed with ghgw owner count from the next request. The log goes to stdout.",
+		Long: "Run the gateway listener: git fetch, clone and push through ghgw, for the users of the\n" +
+			"policy file and with the credentials of the owners in the local store. Pushes are checked\n" +
+			"ref by ref before they reach GitHub. The policy file is read again when it changes, and\n" +
+			"so are the TLS certificate and key files; owners added or removed with ghgw owner count\n" +
+			"from the next request. The log goes to stdout.",
 		Example: "  ghgw serve --tls-cert /etc/ghgw/cert.pem --tls-key /etc/ghgw/key.pem\n" +
 			"  ghgw serve --listen 127.0.0.1:8443 --tls-cert cert.pem --tls-key key.pem --policy policy.yaml",
 		Args: cobra.NoArgs,
@@ -71,6 +73,7 @@ func serve(ctx context.Context, o serveOptions, ln net.Listener, log *slog.Logge
 		PolicyPath: policy,
 		Store:      s,
 		GitURL:     o.gitURL,
+		APIURL:     o.apiURL,
 		RootCAs:    o.rootCAs,
 		Logger:     log,
 	})
