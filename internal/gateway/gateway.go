@@ -158,6 +158,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch rest, isREST := strings.CutPrefix(r.URL.Path, apiPrefix); {
 	case r.URL.Path == graphQLPath:
 		g.serveGraphQL(w, r)
+	case strings.HasPrefix(r.URL.Path, ghgwPrefix):
+		g.serveGhgw(w, r)
 	case isREST && (rest == "" || strings.HasPrefix(rest, "/")):
 		if rest == "" {
 			rest = "/"
