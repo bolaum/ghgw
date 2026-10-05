@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
+	"github.com/bolaum/ghgw/internal/policyfile"
 	"github.com/bolaum/ghgw/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -37,6 +40,10 @@ func addStateDirFlag(cmd *cobra.Command, dir *string) {
 	cmd.PersistentFlags().StringVar(dir, "state-dir", "", "state directory (default $"+stateDirEnv+", else $XDG_STATE_HOME/ghgw)")
 }
 
+func addPolicyFlag(cmd *cobra.Command, path *string) {
+	cmd.Flags().StringVar(path, "policy", "", "policy file (default $"+policyEnv+", else $XDG_CONFIG_HOME/ghgw/policy.yaml)")
+}
+
 // openStore opens the store in dir, or in the default state directory when dir is empty, with
 // the master key from the environment when it is set there.
 func openStore(ctx context.Context, dir string) (*store.Store, error) {
@@ -49,4 +56,19 @@ func openStore(ctx context.Context, dir string) (*store.Store, error) {
 	// v0 has no admin API (SPEC.md section 9), so the admin token a first start creates is unused.
 	s, _, err := store.Open(ctx, dir, store.Options{MasterKey: store.NewSecret(os.Getenv(masterKeyEnv))})
 	return s, err
+}
+
+// loadPolicy loads the policy file at path, or at the default path when path is empty.
+func loadPolicy(path string) (*policyfile.File, error) {
+	if path == "" {
+		var err error
+		if path, err = defaultPath(policyEnv, "XDG_CONFIG_HOME", ".config", "ghgw/policy.yaml"); err != nil {
+			return nil, err
+		}
+	}
+	pf, err := policyfile.Load(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("policy file %s does not exist; write it (SPEC.md section 6) or point to it with --policy or $%s", path, policyEnv)
+	}
+	return pf, err
 }
