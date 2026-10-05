@@ -10,7 +10,7 @@ import (
 
 // Class says what allows a REST operation: a preset, every user, or nothing (a hard rule).
 // Each entry of the operation table has exactly one class. The hard rules do not depend on it:
-// hardRuleClass recognizes their method and path families on its own, NewRESTTable rejects entries
+// hardRuleClasses recognizes their method and path families on its own, NewRESTTable rejects entries
 // classified otherwise, and Decide denies them whatever the class says.
 type Class int
 
@@ -116,7 +116,9 @@ var globalRoutes = []string{"GET /rate_limit", "GET /meta"}
 
 // A family is a set of repository paths (segments after /repos/{owner}/{repo}) that a hard rule
 // covers, for writes (any method but GET) or for every method. In patterns, "*" is one segment
-// and "**" is any number of segments, none included.
+// and "**" is any number of segments, none included. Every pattern starts with a literal segment,
+// so the first segment of a path, which templates must spell out, decides which families can
+// apply.
 type family struct {
 	class      Class
 	writesOnly bool
@@ -133,44 +135,51 @@ var families = []family{
 	{ClassRelease, true, []string{"releases/**"}},
 	{ClassCIResult, true, []string{"statuses/**", "check-runs/**", "check-suites/**"}},
 	{ClassTrigger, true, []string{"dispatches", "actions/workflows/*/dispatches", "deployments/**"}},
-	{ClassAdmin, true, []string{"", "transfer", "forks", "topics/**", "branches/**/rename"}},
+	// "branches/*/**/..." needs a branch name first: GET branches/{branch} for a branch called
+	// "protection" is not the protection endpoint.
+	{ClassAdmin, true, []string{"", "transfer", "forks", "topics/**", "branches/*/**/rename"}},
 	{ClassAdmin, false, []string{
 		"collaborators/**", "invitations/**", "hooks/**", "keys/**", "environments/**", "rulesets/**",
 		"pages/**", "autolinks/**", "vulnerability-alerts/**", "automated-security-fixes/**",
 		"private-vulnerability-reporting/**",
 		"actions/permissions/**", "actions/runners/**", "actions/runner-groups/**", "actions/oidc/**",
 		"actions/cache/**", "actions/caches/**",
-		"**/secrets/**", "**/variables/**", "**/organization-secrets/**", "**/organization-variables/**",
-		"branches/**/protection/**",
+		"actions/secrets/**", "actions/variables/**", "actions/organization-secrets/**",
+		"actions/organization-variables/**", "dependabot/secrets/**", "codespaces/secrets/**",
+		"branches/*/**/protection/**",
 	}},
 }
 
-// hardRuleClass returns the hard rule whose family covers method and path, if any. Paths outside
-// /repos/{owner}/{repo} are all covered (unscoped), except GET /rate_limit and GET /meta.
-func hardRuleClass(method, path string) (Class, bool) {
+// hardRuleClasses returns every hard rule whose family method and path can reach, in the order of
+// families. Paths outside /repos/{owner}/{repo} are all covered (unscoped), except GET /rate_limit
+// and GET /meta. In a template, a {parameter} segment stands for any one segment, so a template is
+// covered when some value of its parameters would be.
+func hardRuleClasses(method, path string) []Class {
 	rest, inRepo := strings.CutPrefix(path, repoPathPrefix)
 	if !inRepo || rest != "" && !strings.HasPrefix(rest, "/") {
 		if slices.Contains(globalRoutes, method+" "+path) {
-			return 0, false
+			return nil
 		}
-		return ClassUnscoped, true
+		return []Class{ClassUnscoped}
 	}
 	var segs []string
 	if rest != "" {
 		segs = strings.Split(rest[1:], "/")
 	}
 	write := method != "GET"
+	var classes []Class
 	for _, f := range families {
-		if f.writesOnly && !write {
+		if f.writesOnly && !write || slices.Contains(classes, f.class) {
 			continue
 		}
 		for _, p := range f.patterns {
 			if matchSegments(splitPattern(p), segs) {
-				return f.class, true
+				classes = append(classes, f.class)
+				break
 			}
 		}
 	}
-	return 0, false
+	return classes
 }
 
 func splitPattern(p string) []string {
@@ -181,7 +190,8 @@ func splitPattern(p string) []string {
 }
 
 // matchSegments reports whether segs match pattern, where "*" matches one segment and "**" any
-// number of segments. Patterns are the fixed families above, with at most two "**".
+// number of segments; a {parameter} in segs matches any one pattern segment. Patterns are the
+// fixed families above, with at most two "**".
 func matchSegments(pattern, segs []string) bool {
 	if len(pattern) == 0 {
 		return len(segs) == 0
@@ -194,15 +204,22 @@ func matchSegments(pattern, segs []string) bool {
 		}
 		return false
 	}
-	return len(segs) > 0 && (pattern[0] == "*" || pattern[0] == segs[0]) && matchSegments(pattern[1:], segs[1:])
+	return len(segs) > 0 && (pattern[0] == "*" || pattern[0] == segs[0] || isParam(segs[0])) &&
+		matchSegments(pattern[1:], segs[1:])
 }
 
-// class returns the operation's class, overridden by the hard rule that covers it, if any.
+func isParam(seg string) bool {
+	return strings.HasPrefix(seg, "{")
+}
+
+// class returns the operation's class, unless a hard rule it can reach says otherwise: then the
+// first such hard rule.
 func (o RESTOperation) class() Class {
-	if hard, ok := hardRuleClass(o.Method, o.Path); ok {
-		return hard
+	hard := hardRuleClasses(o.Method, o.Path)
+	if len(hard) == 0 || slices.Contains(hard, o.Class) {
+		return o.Class
 	}
-	return o.Class
+	return hard[0]
 }
 
 func (o RESTOperation) repoScoped() bool {
@@ -248,33 +265,40 @@ func NewRESTTable(ops []RESTOperation) (*RESTTable, error) {
 }
 
 func checkOperation(op RESTOperation) error {
+	name := printable(op.Name)
 	if !operationNameRE.MatchString(op.Name) {
-		return fmt.Errorf("operation %q: the name must be lowercase dotted words, e.g. pulls.create", op.Name)
+		return fmt.Errorf("operation %s: the name must be lowercase dotted words, e.g. pulls.create", name)
 	}
 	switch op.Method {
 	case "GET", "POST", "PUT", "PATCH", "DELETE":
 	default:
-		return fmt.Errorf("operation %s: unknown method %q", op.Name, op.Method)
+		return fmt.Errorf("operation %s: unknown method %s", name, printable(op.Method))
 	}
 	if _, ok := classNames[op.Class]; !ok {
-		return fmt.Errorf("operation %s: unknown class %d", op.Name, op.Class)
+		return fmt.Errorf("operation %s: unknown class %d", name, op.Class)
 	}
 	if (op.Class == ClassRead || op.Class == ClassGlobal) && op.Method != "GET" {
-		return fmt.Errorf("operation %s: only GET operations can be read or global, not %s", op.Name, op.Method)
+		return fmt.Errorf("operation %s: only GET operations can be read or global, not %s", name, op.Method)
 	}
 	inRepo := op.Path == repoPathPrefix || strings.HasPrefix(op.Path, repoPathPrefix+"/")
 	switch {
 	case !pathTemplateRE.MatchString(op.Path):
-		return fmt.Errorf("operation %s: path %q must be '/'-separated segments of lowercase letters, digits, '-' and '_', or whole-segment {parameters}", op.Name, printable(op.Path))
+		return fmt.Errorf("operation %s: path %s must be '/'-separated segments of lowercase letters, digits, '-' and '_', or whole-segment {parameters}", name, printable(op.Path))
 	case op.repoScoped() && !inRepo:
-		return fmt.Errorf("operation %s: path %q must start with %s", op.Name, op.Path, repoPathPrefix)
+		return fmt.Errorf("operation %s: path %s must start with %s", name, printable(op.Path), repoPathPrefix)
 	case !op.repoScoped() && inRepo:
-		return fmt.Errorf("operation %s: path %q is repository-scoped; use a repository class", op.Name, op.Path)
+		return fmt.Errorf("operation %s: path %s is repository-scoped; use a repository class", name, printable(op.Path))
 	case op.Class == ClassGlobal && !slices.Contains(globalRoutes, op.Method+" "+op.Path):
-		return fmt.Errorf("operation %s: only %s can be global", op.Name, strings.Join(globalRoutes, " and "))
+		return fmt.Errorf("operation %s: only %s can be global", name, strings.Join(globalRoutes, " and "))
+	case inRepo && op.Path != repoPathPrefix && isParam(strings.Split(op.Path, "/")[4]):
+		return fmt.Errorf("operation %s: path %s must spell out the segment after %s", name, printable(op.Path), repoPathPrefix)
 	}
-	if hard := op.class(); hard != op.Class {
-		return fmt.Errorf("operation %s: %s %s falls under a hard rule; its class must be %s", op.Name, op.Method, op.Path, hard)
+	if hard := hardRuleClasses(op.Method, op.Path); len(hard) > 0 && !slices.Contains(hard, op.Class) {
+		names := make([]string, len(hard))
+		for i, c := range hard {
+			names[i] = c.String()
+		}
+		return fmt.Errorf("operation %s: %s %s can reach a hard rule; its class must be %s", name, op.Method, printable(op.Path), strings.Join(names, " or "))
 	}
 	return nil
 }

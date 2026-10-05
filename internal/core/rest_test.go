@@ -1,7 +1,9 @@
 package core
 
 import (
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -38,18 +40,18 @@ func TestNewRESTTable(t *testing.T) {
 				{Name: "a.k", Method: "GET", Path: "/repos/{owner}/{repo}", Class: ClassUnscoped},
 			},
 			wantErr: []string{
-				`operation "Pulls.List": the name must be lowercase dotted words`,
+				"operation Pulls.List: the name must be lowercase dotted words",
 				`operation "": the name must be lowercase dotted words`,
-				`operation a.b: unknown method "get"`,
+				"operation a.b: unknown method get",
 				"operation a.c: unknown class 0",
 				"operation a.d: unknown class 11",
 				"operation a.e: only GET operations can be read or global, not POST",
 				"operation a.f: only GET operations can be read or global, not DELETE",
-				`operation a.g: path "repos/{owner}/{repo}/a" must be '/'-separated segments`,
-				`operation a.h: path "/user/repos" must start with /repos/{owner}/{repo}`,
-				`operation a.i: path "/repos/{owner}/{repo}x" must be '/'-separated segments`,
-				`operation a.j: path "/repos/{owner}/{repo}/a" is repository-scoped; use a repository class`,
-				`operation a.k: path "/repos/{owner}/{repo}" is repository-scoped; use a repository class`,
+				"operation a.g: path repos/{owner}/{repo}/a must be '/'-separated segments",
+				"operation a.h: path /user/repos must start with /repos/{owner}/{repo}",
+				"operation a.i: path /repos/{owner}/{repo}x must be '/'-separated segments",
+				"operation a.j: path /repos/{owner}/{repo}/a is repository-scoped; use a repository class",
+				"operation a.k: path /repos/{owner}/{repo} is repository-scoped; use a repository class",
 			},
 		},
 		{
@@ -73,11 +75,11 @@ func TestNewRESTTable(t *testing.T) {
 				{Name: "contents.delete", Method: "DELETE", Path: "/repos/{owner}/{repo}/contents/{path}", Class: ClassAdmin},
 			},
 			wantErr: []string{
-				"operation contents.update: PUT /repos/{owner}/{repo}/contents/{path} falls under a hard rule; its class must be code change",
-				"operation pulls.merge: PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge falls under a hard rule; its class must be merge",
-				"operation hooks.list: GET /repos/{owner}/{repo}/hooks falls under a hard rule; its class must be admin",
-				"operation repos.update: PATCH /repos/{owner}/{repo} falls under a hard rule; its class must be admin",
-				"operation contents.delete: DELETE /repos/{owner}/{repo}/contents/{path} falls under a hard rule; its class must be code change",
+				"operation contents.update: PUT /repos/{owner}/{repo}/contents/{path} can reach a hard rule; its class must be code change",
+				"operation pulls.merge: PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge can reach a hard rule; its class must be merge",
+				"operation hooks.list: GET /repos/{owner}/{repo}/hooks can reach a hard rule; its class must be admin",
+				"operation repos.update: PATCH /repos/{owner}/{repo} can reach a hard rule; its class must be admin",
+				"operation contents.delete: DELETE /repos/{owner}/{repo}/contents/{path} can reach a hard rule; its class must be code change",
 			},
 		},
 		{
@@ -111,6 +113,9 @@ func TestNewRESTTable(t *testing.T) {
 				return
 			}
 			checkErrorLines(t, err, tt.wantErr)
+			if table != nil {
+				t.Errorf("NewRESTTable() returned a table with an error")
+			}
 		})
 	}
 
@@ -158,7 +163,93 @@ func TestNonCanonicalPathTemplates(t *testing.T) {
 	}
 }
 
-func TestHardRuleClass(t *testing.T) {
+// TestTemplateParameters checks that a {parameter} cannot hide a hard-rule path: the segment after
+// the repository must be literal, and an allowed template is rejected when some value of its
+// parameters reaches a hard-rule family.
+func TestTemplateParameters(t *testing.T) {
+	const repo = "/repos/{owner}/{repo}"
+	tests := []struct {
+		method, path string
+		class        Class
+		wantErr      string // empty: accepted
+	}{
+		{"PUT", repo + "/{resource}/{path}", ClassPR, "must spell out the segment after"},
+		{"GET", repo + "/{resource}", ClassRead, "must spell out the segment after"},
+		{"DELETE", repo + "/{resource}", ClassCodeChange, "must spell out the segment after"},
+		{"PUT", repo + "/pulls/{pull_number}/{action}", ClassPR, "its class must be code change or merge"},
+		{"POST", repo + "/actions/workflows/{workflow_id}/{action}", ClassPR, "its class must be trigger"},
+		{"GET", repo + "/actions/{section}", ClassRead, "its class must be admin"},
+		{"POST", repo + "/actions/{section}/{id}", ClassPR, "its class must be admin"},
+		{"POST", repo + "/actions/{section}/{id}/{action}", ClassPR, "its class must be trigger or admin"},
+		{"GET", repo + "/branches/{branch}/{part}", ClassRead, "its class must be admin"},
+		{"POST", repo + "/branches/{branch}/{action}", ClassPR, "its class must be admin"},
+		{"GET", repo + "/dependabot/{kind}", ClassRead, "its class must be admin"},
+		{"GET", repo + "/environments/{environment_name}", ClassRead, "its class must be admin"},
+		{"POST", repo + "/statuses/{sha}", ClassPR, "its class must be ci result"},
+
+		{"PUT", repo + "/pulls/{pull_number}/{action}", ClassMerge, ""},
+		{"PUT", repo + "/pulls/{pull_number}/{action}", ClassCodeChange, ""},
+		{"GET", repo + "/pulls/{pull_number}", ClassRead, ""},
+		{"POST", repo + "/pulls/{pull_number}/reviews", ClassPR, ""},
+		{"PATCH", repo + "/issues/{issue_number}", ClassPR, ""},
+		{"POST", repo + "/issues/{issue_number}/comments", ClassPR, ""},
+		{"GET", repo + "/branches/{branch}", ClassRead, ""},
+		{"GET", repo + "/contents/{path}", ClassRead, ""},
+		{"GET", repo + "/actions/runs/{run_id}", ClassRead, ""},
+		{"POST", repo + "/actions/runs/{run_id}/rerun", ClassPR, ""},
+		{"GET", repo, ClassRead, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path+" "+tt.class.String(), func(t *testing.T) {
+			table, err := NewRESTTable([]RESTOperation{{Name: "a.b", Method: tt.method, Path: tt.path, Class: tt.class}})
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Errorf("NewRESTTable() error = %v, want none", err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Errorf("NewRESTTable() error = %v, want it to contain %q", err, tt.wantErr)
+			case tt.wantErr != "" && table != nil:
+				t.Error("NewRESTTable() returned a table with an error")
+			}
+		})
+	}
+}
+
+// TestRESTTableCopiesOperations changes the operations a table was built from while deciding
+// concurrently (run with -race): decisions do not change.
+func TestRESTTableCopiesOperations(t *testing.T) {
+	ops := []RESTOperation{{Name: "pulls.create", Method: "POST", Path: "/repos/{owner}/{repo}/pulls", Class: ClassPR}}
+	table, err := NewRESTTable(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPolicy(State{
+		Users:  []User{{Name: "a"}},
+		Grants: []Grant{grant(t, 1, "user a", []string{"o/*"}, AccessRead, nil, PresetPR)},
+		Owners: []string{"o"},
+	}, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := Request{User: "a", Repo: mustRepo(t, "o/x"), Op: REST{Name: "pulls.create"}}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 100 {
+				if d := p.Decide(req); !d.Allowed || d.Grant.ID != 1 {
+					t.Errorf("Decide() = %+v, want allowed by grant 1", d)
+					return
+				}
+			}
+		})
+	}
+	ops[0] = RESTOperation{Name: "pulls.create", Method: "PUT", Path: "/repos/{owner}/{repo}/contents/{path}", Class: ClassCodeChange}
+	wg.Wait()
+	if d := p.Decide(req); !d.Allowed {
+		t.Errorf("after changing the operations, Decide() = %+v, want allowed", d)
+	}
+}
+
+func TestHardRuleClasses(t *testing.T) {
 	const repo = "/repos/{owner}/{repo}"
 	tests := []struct {
 		method, path string
@@ -279,9 +370,12 @@ func TestHardRuleClass(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
-			got, ok := hardRuleClass(tt.method, tt.path)
-			if ok != (tt.want != 0) || ok && got != tt.want {
-				t.Errorf("hardRuleClass() = %v, %v; want %v", got, ok, tt.want)
+			want := []Class{tt.want}
+			if tt.want == 0 {
+				want = nil
+			}
+			if got := hardRuleClasses(tt.method, tt.path); !slices.Equal(got, want) {
+				t.Errorf("hardRuleClasses() = %v, want %v", got, want)
 			}
 		})
 	}
