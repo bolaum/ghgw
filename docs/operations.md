@@ -217,7 +217,7 @@ sensitive that is not registered as a secret; whoever may read CI on GitHub read
 - GitHub's secondary rate limits on content creation cap spam until ghgw has per-user rate
   limits (v1).
 - The table has no edits or deletes of comments and reviews, so an agent cannot rewrite or hide
-  what was said (section 6.3).
+  what was said (section 6.2).
 
 Two risks are common to several entries and limited by the admin, not by the table:
 
@@ -309,7 +309,7 @@ tests.
   that is `{pull_number}`, `{issue_number}`, `{review_id}`, `{comment_id}`, `{run_id}` and
   `{job_id}`. Without that, `pulls/{pull_number}` and `issues/{issue_number}` would also match
   `pulls/comments`, `issues/comments` and `issues/events`, repository-wide lists that are left
-  out (6.4). Preferring literal routes does not help: those lists are not in the table to prefer.
+  out (6.3). Preferring literal routes does not help: those lists are not in the table to prefer.
 - **Parameters that span segments.** Branch names and file paths contain `/`, so two parameters
   match one or more segments: `{path}` in `contents/{path}` and `{branch}` in
   `branches/{branch}`. `GET contents` (the root directory) is `repos.get-content` too. A
@@ -318,7 +318,7 @@ tests.
   out: there is none below `contents/{path}`, and only branch protection (Administration) below
   `branches/{branch}`. Every other parameter matches one segment.
 - **Commit refs.** `{ref}` in `commits/{ref}` matches one segment. GitHub has five reads below it
-  that are left out (6.4): `commits/{ref}/comments`, `pulls`, `branches-where-head`,
+  that are left out (6.3): `commits/{ref}/comments`, `pulls`, `branches-where-head`,
   `check-suites` and `statuses`. A spanning `{ref}` would admit them as `repos.get-commit` of a
   ref named `3f2a9c1/comments`, and literal precedence cannot help, since they are not in the
   table. Agents pass a SHA (`git rev-parse`), as in sections 2.2 and 2.5, or a branch name
@@ -414,35 +414,21 @@ denied, whatever a grant says.
 
 | Hard rule | GitHub operations it covers | Why |
 |---|---|---|
-| Code change | `repos.create-or-update-file-contents`, `repos.delete-file`, `git.create-blob`, `git.create-tree`, `git.create-commit`, `git.create-tag`, `git.create-ref`, `git.update-ref`, `git.delete-ref`, `repos.merge`, `repos.merge-upstream`, `pulls.update-branch` | Every code change goes through the push checks, in one place. |
-| Merge | `pulls.merge` | A person merges. |
+| Code change | `repos.create-or-update-file-contents`, `repos.delete-file`, `git.create-blob`, `git.create-tree`, `git.create-commit`, `git.create-tag`, `git.create-ref`, `git.update-ref`, `git.delete-ref`, `repos.merge`, `repos.merge-upstream`, `pulls.update-branch`, `code-scanning.commit-autofix`, the source import writes (`migrations.*`, deprecated) | Every code change goes through the push checks, in one place. The autofix commits to a branch; a source import rewrites the repository. |
+| Merge | `pulls.merge`, `pulls.merge-async` | A person merges. `pulls.merge-async` merges a pull request (a whole stack for stacked pull requests) or adds it to the merge queue. |
 | Release | `repos.create-release`, `repos.update-release`, `repos.delete-release`, `repos.generate-release-notes`, the release asset writes, reactions on releases | A release creates a tag, and tags cannot be pushed. |
-| CI result | `repos.create-commit-status`, `checks.create`, `checks.update`, `checks.rerequest-run`, `checks.create-suite`, `checks.rerequest-suite`, `checks.set-suites-preferences` | An agent could forge results. Re-requesting checks of other CI apps falls here too; Actions re-runs do not. |
-| Trigger | `repos.create-dispatch-event`, `actions.create-workflow-dispatch`, `repos.create-deployment`, `repos.create-deployment-status`, `repos.delete-deployment` | They run with the repository's secrets. |
-| Administration | 180 operations: `repos.update`, `repos.delete`, `repos.transfer`, `repos.create-fork`, topics, branch rename and protection, collaborators, invitations, hooks, deploy keys, environments, rulesets, Pages, autolinks, security toggles, Actions permissions, runners, OIDC and caches, secrets and variables | Not an agent's job, and much of it would lift the limits ghgw relies on. |
+| CI result | `repos.create-commit-status`, `checks.create`, `checks.update`, `checks.rerequest-run`, `checks.create-suite`, `checks.rerequest-suite`, `checks.set-suites-preferences`, `repos.create-attestation`, `code-scanning.upload-sarif`, `dependency-graph.create-repository-snapshot` | An agent could forge results, build provenance, code scanning results and dependency submissions. Re-requesting checks of other CI apps falls here too; Actions re-runs do not. |
+| Trigger | `repos.create-dispatch-event`, `actions.create-workflow-dispatch`, `repos.create-deployment`, `repos.create-deployment-status`, `repos.delete-deployment`, `actions.approve-workflow-run`, `actions.review-pending-deployments-for-run`, `actions.review-custom-gates-for-run`, `codespaces.create-with-repo-for-authenticated-user`, `codespaces.create-with-pr-for-authenticated-user` | They run with the repository's secrets: a workflow, a fork's run once approved, a deployment, a codespace with the Codespaces secrets. |
+| Administration | 231 operations: `repos.update`, `repos.delete`, `repos.transfer`, `repos.create-fork`, topics, branch rename and protection, collaborators, invitations, hooks, deploy keys, environments, rulesets, Pages, autolinks, interaction limits, immutable releases, custom properties, security toggles and settings, Actions permissions, policies, runners, OIDC and caches, enabling and disabling workflows, secrets and variables (agent ones included), alert and advisory writes, every secret scanning operation | Not an agent's job, and much of it would lift the limits ghgw relies on. Secret scanning alerts carry the detected secret in clear text unless `hide_secret=true`, so their reads are excluded too. |
 | Not repository-scoped | `/user`, `/orgs`, `/search`, `/gists`, `/notifications`, `/markdown`, ...; only `GET /rate_limit` and `GET /meta` are `global` | ghgw picks the credential and checks the grant by repository. |
-
-### 6.2 Gaps in the families
-
-Sorting GitHub's operations found writes that belong to a hard rule but reach no family. The
-tables do not list them, so they are denied today; but the families exist to catch a
-misclassified entry, so they should cover these too. A small `core` pull request before M7 adds
-them to `internal/core/rest.go` and SPEC.md section 5.3, with a test per row:
-
-| Hard rule | Add | Operations and why |
-|---|---|---|
-| Merge | writes to `pulls/{n}/merge-async` | `pulls.merge-async` merges a pull request (a whole stack for stacked pull requests) or adds it to the merge queue. |
-| Code change | writes to `code-scanning/alerts/{n}/autofix/commits`; writes under `import/` | `code-scanning.commit-autofix` commits to a branch; the source import operations (deprecated) rewrite the repository. |
-| CI result | writes to `attestations`, `code-scanning/sarifs` and `dependency-graph/snapshots` | Build provenance, code scanning results and dependency submissions an agent could forge. |
-| Trigger | writes to `actions/runs/{id}/approve`, `actions/runs/{id}/pending_deployments`, `actions/runs/{id}/deployment_protection_rule`, `codespaces` and `pulls/{n}/codespaces` | Running a fork's workflows, approving deployments, starting a codespace with the repository's Codespaces secrets. |
-| Administration | every method under `agents/secrets`, `agents/variables`, `agents/organization-secrets`, `agents/organization-variables`, `actions/policies` and `secret-scanning`; writes to `actions/workflows/{id}/enable` and `disable`, and under `interaction-limits`, `immutable-releases`, `properties`, `code-scanning`, `code-quality`, `dependabot/alerts` and `security-advisories` | Secrets, variables and Actions policies like the ones the family already has; security settings and alert dismissals. Secret scanning alerts carry the detected secret in clear text unless `hide_secret=true`, so their reads are excluded too. |
 
 The families also err the other way, which costs nothing here: `PATCH` and `DELETE`
 `pulls/comments/{comment_id}` (`pulls.update-review-comment`, `pulls.delete-review-comment`) can
-reach `pulls/{n}/update-branch` and `pulls/{n}/merge` through their parameter, so
-`NewRESTTable` would only accept them with a hard-rule class. They are left out anyway (6.3).
+reach `pulls/{n}/update-branch`, `pulls/{n}/merge` and the other `pulls/{n}/...` family paths
+through their parameter, so `NewRESTTable` would only accept them with a hard-rule class. They are
+left out anyway (6.2).
 
-### 6.3 Writes left out by choice
+### 6.2 Writes left out by choice
 
 | Group | Operations | Why |
 |---|---|---|
@@ -455,14 +441,14 @@ reach `pulls/{n}/update-branch` and `pulls/{n}/merge` through their parameter, s
 | | `actions.delete-workflow-run`, `actions.delete-workflow-run-logs`, `actions.delete-artifact` | Destroys CI history. |
 | The user's own settings | `activity.set-repo-subscription`, `activity.delete-repo-subscription`, `activity.mark-repo-notifications-as-read` | About the credential's user, not the repository. |
 
-### 6.4 Reads left out by choice
+### 6.3 Reads left out by choice
 
 | Group | Operations | Why |
 |---|---|---|
 | Git data and archives | `git.get-*`, `git.list-matching-refs`, `repos.compare-commits`, `repos.list-tags`, `repos.get-readme`, `repos.get-readme-in-directory`, `repos.download-tarball-archive`, `repos.download-zipball-archive` | The clone answers them (`git log`, `git diff`, `git ls-remote --tags`). |
 | More of the same resources | `pulls.list-comments-for-review`, `pulls.check-if-merged`, `pulls.list-requested-reviewers`, `issues.list-comments-for-repo`, `pulls.list-review-comments-for-repo`, `issues.list-labels-on-issue`, `pulls.get-merge-async-result`, pull request stacks, commit comments, issue events and timeline, assignees, milestones, sub-issues, dependencies, `repos.list-pull-requests-associated-with-commit`, `repos.list-branches-for-head-commit`, reactions | The listed reads already return this, or the workflows do not need it. |
 | More CI | `checks.get`, check suites, `repos.list-commit-statuses-for-ref`, artifacts, timing, approvals, pending deployments, concurrency groups, deployments | The listed CI reads answer "what failed and why". |
-| Security data | secret scanning, code scanning and Dependabot alerts, security advisories, agent secret and variable names, attestations, SBOM and dependency graph, code quality, security settings (`code-security-configuration`, `immutable-releases`, `interaction-limits`) | Vulnerability details and secret metadata are not for agents; 6.2 moves the worst into the Administration family. |
+| Security data | code scanning and Dependabot alerts, security advisories, attestations, SBOM and dependency graph, code quality, security settings (`code-security-configuration`, `immutable-releases`, `interaction-limits`) | Vulnerability details are not for agents; secret scanning and agent secrets and variables are in the Administration family (6.1). |
 | Insights and people | traffic, stats, contributors, stargazers, watchers, forks, teams, events, activity, community profile, languages, license, topics, issue types, custom properties, CODEOWNERS errors, branch rules, installation, hash algorithm, the user's notifications and subscription | Not needed by the workflows. |
 | Other | codespaces reads, `copilot.*`, source import status (`migrations.*`, deprecated) | Not needed by the workflows. |
 
@@ -495,8 +481,8 @@ The maintainer's answers to the questions this proposal asked:
 5. **Labels.** No label writes in v0; v1 adds them with per-grant label allowlists (section 7).
    Not part of the decision: this proposal moves `issues.create` to v1 too, since its body takes
    labels.
-6. **Gaps in the families.** A small `core` pull request before M7, separate from this one,
-   written from section 6.2.
+6. **Gaps in the families.** A small `core` pull request before M7, separate from this one, adds
+   the hard-rule writes that reached no family; section 6.1 includes them.
 7. **Credential permissions.** SPEC.md section 7 lists the fine-grained PAT permissions v0 needs
    and recommends leaving out "Workflows" and "Administration". GitHub's permissions cannot stop
    merges (`pulls.merge` needs Contents write, which push needs too), so ghgw's hard rule is the

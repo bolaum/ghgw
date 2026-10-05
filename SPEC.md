@@ -190,15 +190,20 @@ A grant's `api` is `read`, `pr`, or omitted (no REST operation); `pr` includes `
 Always denied in v0 (hard rules):
 
 - Code changes outside git push: contents writes, git data writes (`/git/refs`, trees, commits),
-  branch merges and syncs. Every code change goes through the push checks in one place.
-- Merging pull requests.
+  branch merges and syncs, code scanning autofix commits, source imports. Every code change goes
+  through the push checks in one place.
+- Merging pull requests, including through the merge queue (`merge-async`).
 - Releases: creating one creates a tag, and tags cannot be pushed.
-- CI results: commit statuses, check runs and check suites, which an agent could forge.
-- Triggering workflows and deployments, which run with the repository's secrets. Re-running the
-  failed jobs of a run stays in the `pr` preset.
+- CI results: commit statuses, check runs and check suites, attestations, code scanning (SARIF)
+  uploads and dependency submissions, which an agent could forge.
+- Triggering workflows and deployments, approving workflow runs and deployments, and creating
+  codespaces: they run with the repository's secrets. Re-running the failed jobs of a run stays in
+  the `pr` preset.
 - Repository administration: settings, transfer, forking, topics, collaborators, hooks, keys,
-  secrets, variables, environments, rulesets, branch protection, Pages, autolinks, security
-  settings, Actions settings (permissions, runners, OIDC, caches).
+  secrets, variables, environments, rulesets, branch protection, Pages, autolinks, interaction
+  limits, custom properties, security settings and alerts (secret scanning alerts, which carry the
+  secret, cannot even be read), Actions settings (permissions, policies, runners, OIDC, caches,
+  enabling and disabling workflows).
 - Endpoints that are not repository-scoped (`/user`, `/orgs`, `/search`, ...), except
   `GET /rate_limit` and `GET /meta`.
 
@@ -237,16 +242,18 @@ The families, on paths under `/repos/{owner}/{repo}` ("writes" means any method 
 
 | Hard rule | Family |
 |---|---|
-| Code change | Writes under `contents/` and `git/`; writes to `merges`, `merge-upstream` and `pulls/{n}/update-branch` (they change branches without a push). |
-| Merge | Writes to `pulls/{n}/merge`. |
+| Code change | Writes under `contents/`, `git/` and `import/`; writes to `merges`, `merge-upstream`, `pulls/{n}/update-branch` and `code-scanning/alerts/{n}/autofix/commits` (they change branches without a push). |
+| Merge | Writes to `pulls/{n}/merge` and `pulls/{n}/merge-async`. |
 | Release | Writes under `releases/` (assets included). |
-| CI result | Writes under `statuses/`, `check-runs/` and `check-suites/`. |
-| Trigger | Writes to `dispatches` and `actions/workflows/{id}/dispatches`; writes under `deployments/`. |
-| Administration | Writes to the repository itself, `transfer`, `forks` and under `topics/`; writes to `branches/{branch}/rename`. Every method under `collaborators`, `invitations`, `hooks`, `keys`, `environments`, `rulesets`, `pages`, `autolinks`, `vulnerability-alerts`, `automated-security-fixes`, `private-vulnerability-reporting`, `actions/permissions`, `actions/runners`, `actions/runner-groups`, `actions/oidc`, `actions/cache`, `actions/caches`, `actions/secrets`, `actions/variables`, `actions/organization-secrets`, `actions/organization-variables`, `dependabot/secrets` and `codespaces/secrets` (environment secrets and variables are under `environments`), and on `branches/{branch}/protection`. |
+| CI result | Writes under `statuses/`, `check-runs/`, `check-suites/`, `attestations/`, `code-scanning/sarifs/` and `dependency-graph/snapshots/`. |
+| Trigger | Writes to `dispatches`, `actions/workflows/{id}/dispatches`, `actions/runs/{id}/approve`, `actions/runs/{id}/pending_deployments`, `actions/runs/{id}/deployment_protection_rule`, `codespaces` and `pulls/{n}/codespaces`; writes under `deployments/`. |
+| Administration | Writes to the repository itself, `transfer`, `forks`, `branches/{branch}/rename`, `actions/workflows/{id}/enable` and `actions/workflows/{id}/disable`, and under `topics/`, `interaction-limits/`, `immutable-releases/`, `properties/`, `code-scanning/`, `code-quality/`, `dependabot/alerts/` and `security-advisories/`. Every method under `collaborators`, `invitations`, `hooks`, `keys`, `environments`, `rulesets`, `pages`, `autolinks`, `vulnerability-alerts`, `automated-security-fixes`, `private-vulnerability-reporting`, `secret-scanning`, `actions/permissions`, `actions/policies`, `actions/runners`, `actions/runner-groups`, `actions/oidc`, `actions/cache`, `actions/caches`, `actions/secrets`, `actions/variables`, `actions/organization-secrets`, `actions/organization-variables`, `agents/secrets`, `agents/variables`, `agents/organization-secrets`, `agents/organization-variables`, `dependabot/secrets` and `codespaces/secrets` (environment secrets and variables are under `environments`), and on `branches/{branch}/protection`. |
 | Not repository-scoped | Every path outside `/repos/{owner}/{repo}` except `GET /rate_limit` and `GET /meta`. |
 
-The families are a backstop for the table, not a complete list of dangerous endpoints: anything
-the table does not list is denied.
+A path can fall in more than one family (a SARIF upload is a CI result and a code scanning write):
+its entry may have any of their classes, and a request is denied with the first one in the order
+above. The families are a backstop for the table, not a complete list of dangerous endpoints:
+anything the table does not list is denied.
 
 ### 5.4 GraphQL
 

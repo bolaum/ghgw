@@ -33,9 +33,11 @@ const (
 	ClassAdmin
 	// ClassRelease: release writes. A release creates a tag, and tags cannot be pushed.
 	ClassRelease
-	// ClassCIResult: commit statuses, check runs and check suites, which an agent could forge.
+	// ClassCIResult: commit statuses, check runs and suites, attestations, code scanning and
+	// dependency submissions, which an agent could forge.
 	ClassCIResult
-	// ClassTrigger: workflow dispatches and deployments, which run with the repository's secrets.
+	// ClassTrigger: workflow dispatches, run and deployment approvals, deployments and codespaces,
+	// which run with the repository's secrets.
 	ClassTrigger
 	// ClassUnscoped: endpoints that are not repository-scoped (/user, /orgs, /search, ...).
 	ClassUnscoped
@@ -129,23 +131,46 @@ type family struct {
 // remains the allow-list, and anything it does not list is denied; the families only make sure
 // that a misclassified entry cannot allow what a hard rule forbids.
 var families = []family{
-	// Every code change goes through the push checks; these change branches without a push.
-	{ClassCodeChange, true, []string{"contents/**", "git/**", "merges", "merge-upstream", "pulls/*/update-branch"}},
-	{ClassMerge, true, []string{"pulls/*/merge"}},
+	// Every code change goes through the push checks; these change branches without a push. Source
+	// imports rewrite the repository.
+	{ClassCodeChange, true, []string{
+		"contents/**", "git/**", "merges", "merge-upstream", "pulls/*/update-branch",
+		"code-scanning/alerts/*/autofix/commits", "import/**",
+	}},
+	// merge-async merges a pull request (or a stack) or adds it to the merge queue.
+	{ClassMerge, true, []string{"pulls/*/merge", "pulls/*/merge-async"}},
 	{ClassRelease, true, []string{"releases/**"}},
-	{ClassCIResult, true, []string{"statuses/**", "check-runs/**", "check-suites/**"}},
-	{ClassTrigger, true, []string{"dispatches", "actions/workflows/*/dispatches", "deployments/**"}},
+	{ClassCIResult, true, []string{
+		"statuses/**", "check-runs/**", "check-suites/**",
+		"attestations/**", "code-scanning/sarifs/**", "dependency-graph/snapshots/**",
+	}},
+	// Approving a fork's run or a deployment runs code with the repository's secrets, and so does
+	// a codespace with the Codespaces secrets.
+	{ClassTrigger, true, []string{
+		"dispatches", "actions/workflows/*/dispatches", "deployments/**",
+		"actions/runs/*/approve", "actions/runs/*/pending_deployments",
+		"actions/runs/*/deployment_protection_rule", "codespaces", "pulls/*/codespaces",
+	}},
 	// "branches/*/**/..." needs a branch name first: GET branches/{branch} for a branch called
 	// "protection" is not the protection endpoint.
-	{ClassAdmin, true, []string{"", "transfer", "forks", "topics/**", "branches/*/**/rename"}},
+	{ClassAdmin, true, []string{
+		"", "transfer", "forks", "topics/**", "branches/*/**/rename",
+		"actions/workflows/*/enable", "actions/workflows/*/disable",
+		"interaction-limits/**", "immutable-releases/**", "properties/**",
+		"code-scanning/**", "code-quality/**", "dependabot/alerts/**", "security-advisories/**",
+	}},
+	// Secret scanning alerts carry the detected secret in clear text, so their reads are covered
+	// too.
 	{ClassAdmin, false, []string{
 		"collaborators/**", "invitations/**", "hooks/**", "keys/**", "environments/**", "rulesets/**",
 		"pages/**", "autolinks/**", "vulnerability-alerts/**", "automated-security-fixes/**",
-		"private-vulnerability-reporting/**",
-		"actions/permissions/**", "actions/runners/**", "actions/runner-groups/**", "actions/oidc/**",
-		"actions/cache/**", "actions/caches/**",
+		"private-vulnerability-reporting/**", "secret-scanning/**",
+		"actions/permissions/**", "actions/policies/**", "actions/runners/**",
+		"actions/runner-groups/**", "actions/oidc/**", "actions/cache/**", "actions/caches/**",
 		"actions/secrets/**", "actions/variables/**", "actions/organization-secrets/**",
-		"actions/organization-variables/**", "dependabot/secrets/**", "codespaces/secrets/**",
+		"actions/organization-variables/**", "agents/secrets/**", "agents/variables/**",
+		"agents/organization-secrets/**", "agents/organization-variables/**",
+		"dependabot/secrets/**", "codespaces/secrets/**",
 		"branches/*/**/protection/**",
 	}},
 }
@@ -212,14 +237,13 @@ func isParam(seg string) bool {
 	return strings.HasPrefix(seg, "{")
 }
 
-// class returns the operation's class, unless a hard rule it can reach says otherwise: then the
-// first such hard rule.
+// class returns the first hard rule the operation can reach, whatever its entry says, so a path in
+// several families is always denied with the same rule; otherwise the entry's class.
 func (o RESTOperation) class() Class {
-	hard := hardRuleClasses(o.Method, o.Path)
-	if len(hard) == 0 || slices.Contains(hard, o.Class) {
-		return o.Class
+	if hard := hardRuleClasses(o.Method, o.Path); len(hard) > 0 {
+		return hard[0]
 	}
-	return hard[0]
+	return o.Class
 }
 
 func (o RESTOperation) repoScoped() bool {
