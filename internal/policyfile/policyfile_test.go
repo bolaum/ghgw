@@ -253,3 +253,24 @@ func TestLoad(t *testing.T) {
 		})
 	}
 }
+
+// TestSpecExample keeps the policy file example of SPEC.md section 6 valid.
+func TestSpecExample(t *testing.T) {
+	spec, err := os.ReadFile("../../SPEC.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, _ := strings.Cut(string(spec), "\n## 6. Policy\n")
+	_, example, ok := strings.Cut(section, "```yaml\n")
+	example, _, ok2 := strings.Cut(example, "```")
+	if !ok || !ok2 {
+		t.Fatal("SPEC.md section 6 has no yaml example")
+	}
+	pf, err := Parse([]byte(example))
+	if err != nil {
+		t.Fatalf("Parse(SPEC.md example) error = %v", err)
+	}
+	if len(pf.State.Users) != 2 || len(pf.State.Groups) != 1 || len(pf.State.Grants) != 2 {
+		t.Errorf("SPEC.md example = %+v, want 2 users, 1 group and 2 grants", pf.State)
+	}
+}
