@@ -12,6 +12,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -194,16 +195,21 @@ func parseKeyHash(n yaml.Node) ([]byte, error) {
 	return hash, nil
 }
 
+// pastedKey matches a ghgw key or admin token, which YAML errors may quote: "*ghgw_..." is
+// reported as an unknown anchor, and a value that does not fit its field is quoted in full.
+var pastedKey = regexp.MustCompile(`ghgwa?_[0-9A-Za-z]+`)
+
 // decodeErr returns the problems of a YAML decoding error one per line, without the "yaml: "
-// prefix that says nothing to the admin.
+// prefix that says nothing to the admin, and with any key they quote redacted.
 func decodeErr(err error) error {
+	msgs := []string{strings.TrimPrefix(err.Error(), "yaml: ")}
 	var te *yaml.TypeError
 	if errors.As(err, &te) {
-		errs := make([]error, len(te.Errors))
-		for i, e := range te.Errors {
-			errs[i] = errors.New(e)
-		}
-		return errors.Join(errs...)
+		msgs = te.Errors
 	}
-	return errors.New(strings.TrimPrefix(err.Error(), "yaml: "))
+	errs := make([]error, len(msgs))
+	for i, m := range msgs {
+		errs[i] = errors.New(pastedKey.ReplaceAllString(m, "[redacted]"))
+	}
+	return errors.Join(errs...)
 }

@@ -240,7 +240,7 @@ func TestParseErrorsDoNotQuoteKeys(t *testing.T) {
 	for _, value := range []string{
 		key, "sha256:" + key, "github_pat_" + strings.Repeat("x", 40),
 		"!!int " + key, "!!bool " + key, "!!timestamp " + key, "!!float " + key, "!!binary " + key,
-		"[" + key + "]", "{k: " + key + "}", "!!int " + hashA,
+		"[" + key + "]", "{k: " + key + "}", "!!int " + hashA, "*" + key,
 	} {
 		_, err := Parse([]byte("users:\n  agent:\n    key_hash: " + value + "\n"))
 		if err == nil {
@@ -249,6 +249,11 @@ func TestParseErrorsDoNotQuoteKeys(t *testing.T) {
 		if strings.Contains(err.Error(), value) || strings.Contains(err.Error(), strings.Repeat("c", 64)) {
 			t.Errorf("Parse() error quotes the key_hash value: %q", err)
 		}
+	}
+	// YAML errors quote values outside key_hash too: a key pasted in the wrong field is redacted.
+	_, err := Parse([]byte("users:\n  agent:\n    key_hash: " + hashA + "\n    disabled: " + key + "\n"))
+	if err == nil || strings.Contains(err.Error(), strings.Repeat("c", 64)) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("Parse(disabled: <key>) error = %v, want the key redacted", err)
 	}
 }
 

@@ -325,7 +325,7 @@ users:
 
 - `key_hash` is the SHA-256 of the user's ghgw key, as `ghgw key new` prints it (`sha256:` and 64
   hex characters); every user has one, and no two users share one. Errors never quote it, in case
-  a secret was pasted there.
+  a secret was pasted there, and redact any ghgw key or admin token YAML errors quote elsewhere.
 - Every grant has an `id`. ghgw cannot see a removed grant in a file, so not reusing IDs is the
   admin's part: give a new grant an ID no grant has had.
 - A user's `groups` must be defined under `groups`; a group may have no grants.
