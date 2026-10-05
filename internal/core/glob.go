@@ -28,27 +28,27 @@ type RepoGlob struct {
 func ParseRepoGlob(s string) (RepoGlob, error) {
 	owner, name, ok := strings.Cut(s, "/")
 	if !ok {
-		return RepoGlob{}, fmt.Errorf("repository pattern %s: want owner/name, e.g. bolaum/* or acme/app", printable(s))
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: want owner/name, e.g. bolaum/* or acme/app", Printable(s))
 	}
 	if strings.Contains(owner, "*") {
-		return RepoGlob{}, fmt.Errorf("repository pattern %s: the owner cannot contain '*'; add one pattern per owner", printable(s))
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: the owner cannot contain '*'; add one pattern per owner", Printable(s))
 	}
 	if err := checkOwnerName(owner); err != nil {
-		return RepoGlob{}, fmt.Errorf("repository pattern %s: %w", printable(s), err)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: %w", Printable(s), err)
 	}
 	if strings.Contains(name, "**") {
-		return RepoGlob{}, fmt.Errorf("repository pattern %s: use '*' in the name, not '**'", printable(s))
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: use '*' in the name, not '**'", Printable(s))
 	}
 	literal := strings.ReplaceAll(name, "*", "")
 	if name == "" || name == "." || name == ".." || literal != "" && !repoNameRE.MatchString(literal) {
-		return RepoGlob{}, fmt.Errorf("repository pattern %s: name must be letters, digits, '.', '-', '_' or '*'", printable(s))
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: name must be letters, digits, '.', '-', '_' or '*'", Printable(s))
 	}
 	if hasGitSuffix(name) {
-		return RepoGlob{}, fmt.Errorf("repository pattern %s: write the name without the .git suffix", printable(s))
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: write the name without the .git suffix", Printable(s))
 	}
 	re, err := compileGlob(name, "(?i)", ".*")
 	if err != nil {
-		return RepoGlob{}, fmt.Errorf("repository pattern %s: %w", printable(s), err)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: %w", Printable(s), err)
 	}
 	return RepoGlob{text: s, owner: owner, name: re}, nil
 }
@@ -90,23 +90,23 @@ func ParseBranchGlob(s string) (BranchGlob, error) {
 		return BranchGlob{}, errors.New("branch pattern is empty")
 	}
 	if len(s) > maxBranchGlobLen {
-		return BranchGlob{}, fmt.Errorf("branch pattern %s is %d bytes, longer than the %d allowed", printable(s), len(s), maxBranchGlobLen)
+		return BranchGlob{}, fmt.Errorf("branch pattern %s is %d bytes, longer than the %d allowed", Printable(s), len(s), maxBranchGlobLen)
 	}
 	if strings.HasPrefix(s, "refs/") {
-		return BranchGlob{}, fmt.Errorf("branch pattern %s: write the branch name without refs/heads/", printable(s))
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: write the branch name without refs/heads/", Printable(s))
 	}
 	if strings.Contains(s, "***") {
-		return BranchGlob{}, fmt.Errorf("branch pattern %s: use '*' or '**', not three stars", printable(s))
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: use '*' or '**', not three stars", Printable(s))
 	}
 	if strings.Contains(s, "+") || strings.HasPrefix(s, "!") {
-		return BranchGlob{}, fmt.Errorf("branch pattern %s: only literals, '*' and '**' are supported", printable(s))
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: only literals, '*' and '**' are supported", Printable(s))
 	}
 	if err := checkRefName("refs/heads/" + starsRE.ReplaceAllString(s, "x")); err != nil {
-		return BranchGlob{}, fmt.Errorf("branch pattern %s: %w", printable(s), err)
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: %w", Printable(s), err)
 	}
 	re, err := compileGlob(s, "", "[^/]*")
 	if err != nil {
-		return BranchGlob{}, fmt.Errorf("branch pattern %s: %w", printable(s), err)
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: %w", Printable(s), err)
 	}
 	return BranchGlob{text: s, re: re}, nil
 }

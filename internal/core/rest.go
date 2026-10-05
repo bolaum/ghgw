@@ -247,12 +247,12 @@ func NewRESTTable(ops []RESTOperation) (*RESTTable, error) {
 			continue
 		}
 		if _, dup := t.byName[op.Name]; dup {
-			errs = append(errs, fmt.Errorf("operation %s is defined twice", printable(op.Name)))
+			errs = append(errs, fmt.Errorf("operation %s is defined twice", Printable(op.Name)))
 			continue
 		}
 		route := op.Method + " " + op.Path
 		if other, dup := routes[route]; dup {
-			errs = append(errs, fmt.Errorf("operations %s and %s both use %s", printable(other), printable(op.Name), printable(route)))
+			errs = append(errs, fmt.Errorf("operations %s and %s both use %s", Printable(other), Printable(op.Name), Printable(route)))
 			continue
 		}
 		routes[route] = op.Name
@@ -265,40 +265,40 @@ func NewRESTTable(ops []RESTOperation) (*RESTTable, error) {
 }
 
 func checkOperation(op RESTOperation) error {
-	name := printable(op.Name)
+	name := Printable(op.Name)
 	if !operationNameRE.MatchString(op.Name) {
 		return fmt.Errorf("operation %s: the name must be lowercase dotted words, e.g. pulls.create", name)
 	}
 	switch op.Method {
 	case "GET", "POST", "PUT", "PATCH", "DELETE":
 	default:
-		return fmt.Errorf("operation %s: unknown method %s", name, printable(op.Method))
+		return fmt.Errorf("operation %s: unknown method %s", name, Printable(op.Method))
 	}
 	if _, ok := classNames[op.Class]; !ok {
 		return fmt.Errorf("operation %s: unknown class %d", name, op.Class)
 	}
 	if (op.Class == ClassRead || op.Class == ClassGlobal) && op.Method != "GET" {
-		return fmt.Errorf("operation %s: only GET operations can be read or global, not %s", name, printable(op.Method))
+		return fmt.Errorf("operation %s: only GET operations can be read or global, not %s", name, Printable(op.Method))
 	}
 	inRepo := op.Path == repoPathPrefix || strings.HasPrefix(op.Path, repoPathPrefix+"/")
 	switch {
 	case !pathTemplateRE.MatchString(op.Path):
-		return fmt.Errorf("operation %s: path %s must be '/'-separated segments of lowercase letters, digits, '-' and '_', or whole-segment {parameters}", name, printable(op.Path))
+		return fmt.Errorf("operation %s: path %s must be '/'-separated segments of lowercase letters, digits, '-' and '_', or whole-segment {parameters}", name, Printable(op.Path))
 	case op.repoScoped() && !inRepo:
-		return fmt.Errorf("operation %s: path %s must start with %s", name, printable(op.Path), repoPathPrefix)
+		return fmt.Errorf("operation %s: path %s must start with %s", name, Printable(op.Path), repoPathPrefix)
 	case !op.repoScoped() && inRepo:
-		return fmt.Errorf("operation %s: path %s is repository-scoped; use a repository class", name, printable(op.Path))
+		return fmt.Errorf("operation %s: path %s is repository-scoped; use a repository class", name, Printable(op.Path))
 	case op.Class == ClassGlobal && !slices.Contains(globalRoutes, op.Method+" "+op.Path):
 		return fmt.Errorf("operation %s: only %s can be global", name, strings.Join(globalRoutes, " and "))
 	case inRepo && op.Path != repoPathPrefix && isParam(strings.Split(op.Path, "/")[4]):
-		return fmt.Errorf("operation %s: path %s must spell out the segment after %s", name, printable(op.Path), repoPathPrefix)
+		return fmt.Errorf("operation %s: path %s must spell out the segment after %s", name, Printable(op.Path), repoPathPrefix)
 	}
 	if hard := hardRuleClasses(op.Method, op.Path); len(hard) > 0 && !slices.Contains(hard, op.Class) {
 		names := make([]string, len(hard))
 		for i, c := range hard {
 			names[i] = c.String()
 		}
-		return fmt.Errorf("operation %s: %s %s can reach a hard rule; its class must be %s", name, printable(op.Method), printable(op.Path), strings.Join(names, " or "))
+		return fmt.Errorf("operation %s: %s %s can reach a hard rule; its class must be %s", name, Printable(op.Method), Printable(op.Path), strings.Join(names, " or "))
 	}
 	return nil
 }
