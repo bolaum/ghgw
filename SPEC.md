@@ -137,9 +137,11 @@ command is not allowed:
 | Invalid ref names (`git check-ref-format`) | Never. |
 
 If the default branch cannot be looked up or is not a valid branch name, the push is rejected: the
-hard rule cannot be checked. A push without ref update commands is rejected too. Refs and other
-names from the request are quoted when they contain anything but printable characters, wherever
-they are shown (reasons, `ng` lines, `explain`).
+hard rule cannot be checked. A push without ref update commands is rejected too, and so is a push
+with more than 1000 ref updates or with a ref name longer than 1024 bytes; transports enforce these
+limits while parsing, before holding the commands in memory. Refs and other names from the request
+are quoted when they contain anything but printable characters, wherever they are shown (reasons,
+`ng` lines, `explain`), and cut beyond 1024 bytes.
 
 A rejected push is answered by ghgw itself with a receive-pack report (`ng <ref> <reason>`, in the
 sideband when negotiated) and nothing reaches GitHub. Pushes are all-or-nothing: if one ref is
@@ -168,11 +170,16 @@ A grant's `api` is `read`, `pr`, or omitted (no REST operation); `pr` includes `
 
 Always denied in v0 (hard rules):
 
-- Code changes outside git push: contents writes, git data writes (`/git/refs`, trees, commits).
-  Every code change goes through the push checks in one place.
+- Code changes outside git push: contents writes, git data writes (`/git/refs`, trees, commits),
+  branch merges and syncs. Every code change goes through the push checks in one place.
 - Merging pull requests.
-- Repository administration: settings, collaborators, hooks, keys, secrets, variables,
-  environments, rulesets, branch protection.
+- Releases: creating one creates a tag, and tags cannot be pushed.
+- CI results: commit statuses, check runs and check suites, which an agent could forge.
+- Triggering workflows and deployments, which run with the repository's secrets. Re-running jobs
+  stays in the `pr` preset.
+- Repository administration: settings, transfer, forking, topics, collaborators, hooks, keys,
+  secrets, variables, environments, rulesets, branch protection, Pages, autolinks, security
+  settings, Actions settings (permissions, runners, OIDC, caches).
 - Endpoints that are not repository-scoped (`/user`, `/orgs`, `/search`, ...), except
   `GET /rate_limit` and `GET /meta`.
 
@@ -185,13 +192,19 @@ only `GET /rate_limit` and `GET /meta` can be `global`.
 The table is the allow-list. The hard rules are also enforced on their own, from method and path
 families that do not depend on the table: an entry that falls in a family must have that family's
 class (the table is rejected otherwise), and a request is denied by the family's rule whatever its
-entry says. The families, on path templates under `/repos/{owner}/{repo}`:
+entry says. Path templates must be canonical (segments of lowercase letters, digits, `-` and `_`,
+or whole-segment `{parameters}`; no escapes, dots, backslashes or delimiters), so a family cannot be
+dodged by spelling. The families, on paths under `/repos/{owner}/{repo}` ("writes" means any method
+but `GET`):
 
 | Hard rule | Family |
 |---|---|
-| Code change | Any method but `GET` under `contents/` and `git/`; writes to `merges`, `merge-upstream` and `pulls/{n}/update-branch` (they change branches without a push). |
+| Code change | Writes under `contents/` and `git/`; writes to `merges`, `merge-upstream` and `pulls/{n}/update-branch` (they change branches without a push). |
 | Merge | Writes to `pulls/{n}/merge`. |
-| Administration | Writes to the repository itself; every method under `collaborators`, `invitations`, `hooks`, `keys`, `environments`, `rulesets`, on any `secrets` or `variables` segment, and on `branches/{branch}/protection`; writes to `branches/{branch}/rename`. |
+| Release | Writes under `releases/` (assets included). |
+| CI result | Writes under `statuses/`, `check-runs/` and `check-suites/`. |
+| Trigger | Writes to `dispatches` and `actions/workflows/{id}/dispatches`; writes under `deployments/`. |
+| Administration | Writes to the repository itself, `transfer`, `forks` and under `topics/`; writes to `branches/{branch}/rename`. Every method under `collaborators`, `invitations`, `hooks`, `keys`, `environments`, `rulesets`, `pages`, `autolinks`, `vulnerability-alerts`, `automated-security-fixes`, `private-vulnerability-reporting`, `actions/permissions`, `actions/runners`, `actions/runner-groups`, `actions/oidc`, `actions/cache` and `actions/caches`, on any `secrets`, `variables`, `organization-secrets` or `organization-variables` segment, and on `branches/{branch}/protection`. |
 | Not repository-scoped | Every path outside `/repos/{owner}/{repo}` except `GET /rate_limit` and `GET /meta`. |
 
 The families are a backstop for the table, not a complete list of dangerous endpoints: anything
@@ -226,7 +239,9 @@ the agent to use the REST API through `gh api`, with an example (section 8). Mos
   GitHub's other special characters (`?`, `+`, `[`, a leading `!`) are rejected rather than taken
   literally. Globs are case-sensitive, like git refs. A glob must admit a valid branch name: with
   each run of stars replaced by one letter it must pass `git check-ref-format` (`a.*.b` passes,
-  `*.lock` and `.*` are rejected).
+  `*.lock` and `.*` are rejected). A glob cannot start with `refs/`: that is almost always a full
+  ref name written by mistake (`refs/heads/agent/*`). A branch literally named `refs/...` can only
+  be matched by a wildcard such as `**`.
 - `access` governs git and `api` governs REST, independently: a review agent can have
   `access: read` and `api: pr`. `push` globs require `access: write`.
 - User and group names are lowercase (`[a-z0-9][a-z0-9._-]*`, up to 64 characters). A disabled user
