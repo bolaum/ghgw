@@ -376,3 +376,47 @@ reach `pulls/{n}/update-branch` and `pulls/{n}/merge` through their parameter, s
 | Security data | secret scanning, code scanning and Dependabot alerts, security advisories, agent secret and variable names, attestations, SBOM and dependency graph, code quality, security settings (`code-security-configuration`, `immutable-releases`, `interaction-limits`) | Vulnerability details and secret metadata are not for agents; 5.2 moves the worst into the Administration family. |
 | Insights and people | traffic, stats, contributors, stargazers, watchers, forks, teams, events, activity, community profile, languages, license, topics, issue types, custom properties, CODEOWNERS errors, branch rules, installation, hash algorithm, the user's notifications and subscription | Not needed by the workflows. |
 | Other | codespaces reads, `copilot.*`, source import status (`migrations.*`, deprecated) | Not needed by the workflows. |
+
+## 6. Open questions
+
+1. **Approvals.** `pulls.create-review` lets an agent approve someone else's pull request
+   (4.2). Should M7 read the `event` field of that one request's JSON body and deny `APPROVE`
+   (a small, bounded exception to classifying by method and path), accept the risk, or leave
+   reviews out and let review agents comment instead? Proposal: deny `APPROVE` in M7.
+2. **Check runs and fine-grained PATs.** GitHub's docs require the "Checks" permission for
+   `checks.list-for-ref`, and fine-grained PATs do not offer it (the `gh` CLI says the same when
+   annotations fail). With v0 credentials it probably works on public repositories only. Keep it
+   for those and for GitHub App credentials (v1), or drop it until v1? The same holds for
+   `checks.list-annotations` (line-level errors of linters and test reporters), which is left out.
+3. **More `pr` writes.** Add `actions.re-run-job-for-workflow-run` (one job, successful ones
+   included; what `gh run rerun --job` uses) or `pulls.request-reviewers` (ask a person to
+   review the agent's pull request)? Both are left out.
+4. **Log redirects.** Job logs answer with a one-minute signed URL on a GitHub storage host. The
+   proposal passes it through, so agents need network access to that host. Should the gateway
+   follow the redirect and stream the log instead, so agents only ever reach the gateway?
+5. **Labels.** Labels can drive merges, deploys and CI with secrets (4.1). Is admin guidance
+   enough in v0, or should grants list the labels an agent may add (which means reading bodies)?
+6. **Gaps in the families.** Add the families of 5.2 (and update SPEC.md section 5.3) in M7, or
+   in a small `core` pull request before M7?
+7. **Credential permissions.** Should SPEC.md section 7 say which permissions the owner's
+   fine-grained PAT needs for the presets (Metadata read, Contents read and write for push,
+   Pull requests write, Issues write, Actions write, Commit statuses read) and recommend leaving
+   out "Workflows", so agents cannot push workflow changes? Note that GitHub's own permissions
+   cannot stop merges: `pulls.merge` needs Contents write, which push needs too, so ghgw's hard
+   rule is the only barrier.
+8. **Parameters that span segments.** `{path}`, `{branch}`, `{ref}` and `{tag}` can contain `/`
+   (`contents/internal/core/rest.go`, `branches/agent/fix-42`), while SPEC.md says a parameter
+   is one segment. Proposal for M7: the last parameter of a `read` template may span segments,
+   and `GET /repos/{owner}/{repo}/contents` (the root directory) classifies as
+   `repos.get-content`; templates with a parameter in the middle (`commits/{ref}/check-runs`)
+   take one segment, so agents pass a SHA there, as in section 2.6.
+9. **Identity.** Every agent writes as the PAT's user. For organizations, should the docs
+   recommend a dedicated machine user that owns the PAT, so people can tell agents' writes from
+   their own? (For a user's own repositories the PAT has to be that user's.)
+10. **`gh run`.** `gh run view`, `watch` and `rerun` use REST but need more than the table has:
+    workflows, run attempts and their logs, check run annotations, single-job re-runs. Support
+    them in v0, or keep agents on `gh api`? Proposal: `gh api` only.
+
+Not a preset question, noted for M8: `gh auth login --with-token` checks the token with
+`GET /api/v3/` (the API root, for the `X-OAuth-Scopes` header) and a GraphQL `viewer { login }`
+query; neither is in the table.
