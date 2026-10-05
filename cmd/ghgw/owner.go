@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -243,7 +245,7 @@ func checkToken(ctx context.Context, apiURL, owner string, token store.Secret) (
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("cannot check the token with GitHub: %w; check the network and try again", err)
+		return "", fmt.Errorf("cannot check the token with GitHub: %s; check --api-url and the network and try again", transportFailure(err))
 	}
 	defer resp.Body.Close()
 	// What the server sends may be crafted: the status is printed from its code, not its reason
@@ -269,6 +271,25 @@ func checkToken(ctx context.Context, apiURL, owner string, token store.Secret) (
 	}
 	msg := strings.ReplaceAll(body.Message, token.Reveal(), "[redacted]")
 	return "", fmt.Errorf("GitHub answered %s to the token check (%s); fix that and try again", status, core.Printable(msg))
+}
+
+// transportFailure says why a request got no usable answer. It never returns err's text: a
+// response net/http cannot parse is quoted in it, and the server may have put the token there.
+func transportFailure(err error) string {
+	var dnsErr *net.DNSError
+	var opErr *net.OpError
+	var certErr *tls.CertificateVerificationError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded):
+		return fmt.Sprintf("no answer within %s", githubTimeout)
+	case errors.As(err, &dnsErr):
+		return "the host name does not resolve"
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return "the connection was refused or could not be made"
+	case errors.As(err, &certErr):
+		return "the server's TLS certificate is not trusted"
+	}
+	return "the connection failed or the answer is not valid HTTP"
 }
 
 // parseExpiry parses the token expiry GitHub reports ("2026-11-01 12:00:00 UTC" or with an

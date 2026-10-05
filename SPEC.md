@@ -359,8 +359,8 @@ making the request; for a push it also shows the decision on each ref.
   before anything is stored. The call cannot tell whether the token's resource owner is that owner.
   Redirects are not followed, so the token goes only to the API URL. Errors show the answer's
   status code with its standard text, never the server's reason phrase, and its message with the
-  token redacted; an expiry ghgw cannot read is not quoted. A server can put the token in any of
-  these.
+  token redacted; an expiry ghgw cannot read is not quoted. An answer that is not valid HTTP gets
+  a fixed message, since HTTP parsing errors quote it. A server can put the token in any of these.
 - A token is 1 to 1024 visible ASCII characters (no spaces or line breaks: it goes into an HTTP
   header). Surrounding whitespace is trimmed, but input longer than a token and a line break is
   rejected rather than cut to fit.

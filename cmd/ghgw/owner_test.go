@@ -101,7 +101,7 @@ func TestOwners(t *testing.T) {
 		{"unknown owner", goodToken, []string{"add", "nobody", "--api-url", api}, "GitHub has no user or organization nobody; check the owner name"},
 		{"other answer", goodToken, []string{"add", "sso", "--api-url", api}, "GitHub answered 403 Forbidden to the token check (Resource protected by organization SAML enforcement.)"},
 		{"answer without a message", goodToken, []string{"add", "down", "--api-url", api}, "GitHub answered 502 Bad Gateway to the token check; try again later"},
-		{"unreachable", goodToken, []string{"add", "bolaum", "--api-url", "http://127.0.0.1:1"}, "cannot check the token with GitHub"},
+		{"unreachable", goodToken, []string{"add", "bolaum", "--api-url", "http://127.0.0.1:1"}, "cannot check the token with GitHub: the connection was refused or could not be made; check --api-url and the network and try again"},
 		{"no token", "", []string{"add", "bolaum", "--api-url", api}, "the token from stdin is malformed: the token must be 1 to 1024 characters long"},
 		{"token with a space", "github pat", []string{"add", "bolaum", "--api-url", api}, "without spaces or line breaks"},
 		{"token too long", strings.Repeat("a", 2000), []string{"add", "bolaum", "--api-url", api}, "the token from stdin is malformed: it is longer than 1024 characters"},
@@ -135,8 +135,8 @@ func TestOwnerAddUntrustedAnswers(t *testing.T) {
 	var redirected atomic.Int32
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
 	t.Cleanup(elsewhere.Close)
-	// raw answers with status line "HTTP/1.1 " + status, which net/http would not write.
-	raw := func(status string) http.HandlerFunc {
+	// rawAnswer sends answer as is, which net/http would not write.
+	rawAnswer := func(answer string) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) {
 			conn, buf, err := w.(http.Hijacker).Hijack()
 			if err != nil {
@@ -144,10 +144,15 @@ func TestOwnerAddUntrustedAnswers(t *testing.T) {
 				return
 			}
 			defer conn.Close()
-			buf.WriteString("HTTP/1.1 " + status + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			buf.WriteString(answer)
 			buf.Flush()
 		}
 	}
+	// raw answers with status line "HTTP/1.1 " + status.
+	raw := func(status string) http.HandlerFunc {
+		return rawAnswer("HTTP/1.1 " + status + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	}
+	const invalid = "cannot check the token with GitHub: the connection failed or the answer is not valid HTTP; check --api-url and the network and try again"
 	redirect := func(code int) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, elsewhere.URL+r.URL.Path, code)
@@ -170,6 +175,11 @@ func TestOwnerAddUntrustedAnswers(t *testing.T) {
 		{name: "reason phrase with the token", handler: raw("403 " + goodToken), want: "GitHub answered 403 Forbidden to the token check; try again later"},
 		{name: "reason phrase with terminal escapes", handler: raw("403 \x1b[2J\x1b[Hhidden denial"), want: "GitHub answered 403 Forbidden to the token check; try again later"},
 		{name: "unknown status", handler: raw("599 " + goodToken), want: "GitHub answered 599 to the token check; try again later"},
+		{name: "status code with the token", handler: raw(goodToken + " Forbidden"), want: invalid},
+		{name: "status line with the token", handler: rawAnswer("HTTP/1.1 " + goodToken + "\r\n\r\n"), want: invalid},
+		{name: "header line with the token", handler: rawAnswer("HTTP/1.1 403 Forbidden\r\n" + goodToken + "\r\n\r\n"), want: invalid},
+		{name: "content length with the token", handler: rawAnswer("HTTP/1.1 403 Forbidden\r\nContent-Length: " + goodToken + "\r\n\r\n"), want: invalid},
+		{name: "redirect location with the token", handler: rawAnswer("HTTP/1.1 302 Found\r\nLocation: :" + goodToken + "\r\nContent-Length: 0\r\n\r\n"), want: invalid},
 		{
 			name: "expiry with the token",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
