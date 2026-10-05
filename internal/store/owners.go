@@ -29,7 +29,7 @@ func (s *Store) AddOwner(ctx context.Context, name string, token Secret, expires
 	if err := checkNameLen("owner", name); err != nil {
 		return err
 	}
-	if err := checkToken(token); err != nil {
+	if err := CheckToken(token); err != nil {
 		return err
 	}
 	return s.change(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -45,7 +45,7 @@ func (s *Store) AddOwner(ctx context.Context, name string, token Secret, expires
 
 // RotateOwner replaces the credential of an existing owner.
 func (s *Store) RotateOwner(ctx context.Context, name string, token Secret, expiresAt time.Time) error {
-	if err := checkToken(token); err != nil {
+	if err := CheckToken(token); err != nil {
 		return err
 	}
 	return s.change(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -127,9 +127,9 @@ func (s *Store) seal(owner string, token Secret) []byte {
 	return s.aead.Seal(nil, nil, []byte(token.Reveal()), credentialAAD(owner))
 }
 
-// checkToken accepts 1 to MaxTokenLen visible ASCII characters: a token is sent in an HTTP header,
+// CheckToken accepts 1 to MaxTokenLen visible ASCII characters: a token is sent in an HTTP header,
 // where anything else could split it. The error never quotes the token.
-func checkToken(token Secret) error {
+func CheckToken(token Secret) error {
 	t := token.Reveal()
 	if len(t) == 0 || len(t) > MaxTokenLen {
 		return errorf(ErrInvalid, "the token must be 1 to %d characters long", MaxTokenLen)

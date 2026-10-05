@@ -1,0 +1,52 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/bolaum/ghgw/internal/store"
+	"github.com/spf13/cobra"
+)
+
+const (
+	stateDirEnv  = "GHGW_STATE_DIR"
+	policyEnv    = "GHGW_POLICY"
+	masterKeyEnv = "GHGW_MASTER_KEY"
+)
+
+// defaultPath returns $env when it is set, else rel under the XDG base directory $xdgEnv, which
+// defaults to xdgDefault under the home directory.
+func defaultPath(env, xdgEnv, xdgDefault, rel string) (string, error) {
+	if p := os.Getenv(env); p != "" {
+		return p, nil
+	}
+	// The XDG base directory specification says to ignore relative paths.
+	if base := os.Getenv(xdgEnv); filepath.IsAbs(base) {
+		return filepath.Join(base, rel), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("no home directory to find %s in: %w; set %s", rel, err, env)
+	}
+	return filepath.Join(home, xdgDefault, rel), nil
+}
+
+func addStateDirFlag(cmd *cobra.Command, dir *string) {
+	cmd.PersistentFlags().StringVar(dir, "state-dir", "", "state directory (default $"+stateDirEnv+", else $XDG_STATE_HOME/ghgw)")
+}
+
+// openStore opens the store in dir, or in the default state directory when dir is empty, with
+// the master key from the environment when it is set there.
+func openStore(ctx context.Context, dir string) (*store.Store, error) {
+	if dir == "" {
+		var err error
+		if dir, err = defaultPath(stateDirEnv, "XDG_STATE_HOME", ".local/state", "ghgw"); err != nil {
+			return nil, err
+		}
+	}
+	// v0 has no admin API (SPEC.md section 9), so the admin token a first start creates is unused.
+	s, _, err := store.Open(ctx, dir, store.Options{MasterKey: store.NewSecret(os.Getenv(masterKeyEnv))})
+	return s, err
+}

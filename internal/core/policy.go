@@ -209,7 +209,7 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 	}
 
 	for _, o := range s.Owners {
-		if err := checkOwnerName(o); err != nil {
+		if err := CheckOwnerName(o); err != nil {
 			errs = append(errs, err)
 			continue
 		}

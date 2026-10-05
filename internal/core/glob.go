@@ -33,7 +33,7 @@ func ParseRepoGlob(s string) (RepoGlob, error) {
 	if strings.Contains(owner, "*") {
 		return RepoGlob{}, fmt.Errorf("repository pattern %s: the owner cannot contain '*'; add one pattern per owner", Printable(s))
 	}
-	if err := checkOwnerName(owner); err != nil {
+	if err := CheckOwnerName(owner); err != nil {
 		return RepoGlob{}, fmt.Errorf("repository pattern %s: %w", Printable(s), err)
 	}
 	if strings.Contains(name, "**") {
