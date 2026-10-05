@@ -34,6 +34,22 @@ func grant(t *testing.T, id int, holder string, repos []string, access Access, p
 	return g
 }
 
+// checkErrorLines checks that err has one line per entry of want, each starting with it, in order.
+func checkErrorLines(t *testing.T, err error, want []string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("error = nil, want %q", want)
+	}
+	got := strings.Split(err.Error(), "\n")
+	ok := len(got) == len(want)
+	for i := 0; ok && i < len(got); i++ {
+		ok = strings.HasPrefix(got[i], want[i])
+	}
+	if !ok {
+		t.Errorf("errors:\n%s\nwant lines starting with:\n%s", err, strings.Join(want, "\n"))
+	}
+}
+
 func TestNewPolicyValidation(t *testing.T) {
 	users := []User{{Name: "rpi01-agent"}, {Name: "devct01-agent"}}
 	groups := []Group{{Name: "agents", Members: []string{"rpi01-agent", "devct01-agent"}}}
@@ -159,18 +175,7 @@ func TestNewPolicyValidation(t *testing.T) {
 				}
 				return
 			}
-			if err == nil {
-				t.Fatalf("NewPolicy() error = nil, want %q", tt.wantErr)
-			}
-			// Each line of the error starts with the wanted text, in order.
-			got := strings.Split(err.Error(), "\n")
-			ok := len(got) == len(tt.wantErr)
-			for i := 0; ok && i < len(got); i++ {
-				ok = strings.HasPrefix(got[i], tt.wantErr[i])
-			}
-			if !ok {
-				t.Errorf("NewPolicy() errors:\n%s\nwant lines starting with:\n%s", err, strings.Join(tt.wantErr, "\n"))
-			}
+			checkErrorLines(t, err, tt.wantErr)
 		})
 	}
 }
