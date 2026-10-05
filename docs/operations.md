@@ -196,3 +196,115 @@ Every entry is a `GET` on one repository of the grant.
 What `read` exposes beyond a clone: issues, pull requests, comments and CI logs of the granted
 repositories. GitHub masks registered secrets in logs, but a workflow can still print something
 sensitive that is not registered as a secret; whoever may read CI on GitHub reads the same logs.
+
+## 4. The `pr` preset
+
+`pr` is `read` plus these entries.
+
+| Name | Method | Path | Rationale | Docs |
+|---|---|---|---|---|
+| `pulls.create` | POST | `/repos/{owner}/{repo}/pulls` | Open a pull request from a pushed branch. | [docs](https://docs.github.com/rest/pulls/pulls#create-a-pull-request) |
+| `pulls.update` | PATCH | `/repos/{owner}/{repo}/pulls/{pull_number}` | Keep the title and body current; close a pull request the agent gives up on. | [docs](https://docs.github.com/rest/pulls/pulls#update-a-pull-request) |
+| `issues.create-comment` | POST | `/repos/{owner}/{repo}/issues/{issue_number}/comments` | Comment on a pull request or an issue (the conversation, not a line). | [docs](https://docs.github.com/rest/issues/comments#create-an-issue-comment) |
+| `pulls.create-review` | POST | `/repos/{owner}/{repo}/pulls/{pull_number}/reviews` | Review a pull request: a summary and line comments in one call. | [docs](https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request) |
+| `pulls.create-reply-for-review-comment` | POST | `/repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies` | Answer a line comment in its thread. | [docs](https://docs.github.com/rest/pulls/comments#create-a-reply-for-a-review-comment) |
+| `issues.create` | POST | `/repos/{owner}/{repo}/issues` | Report a problem found while working. | [docs](https://docs.github.com/rest/issues/issues#create-an-issue) |
+| `issues.add-labels` | POST | `/repos/{owner}/{repo}/issues/{issue_number}/labels` | Label an issue or a pull request with existing labels. | [docs](https://docs.github.com/rest/issues/labels#add-labels-to-an-issue) |
+| `actions.re-run-workflow-failed-jobs` | POST | `/repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs` | Re-run the failed jobs of a run, e.g. after a flaky failure. | [docs](https://docs.github.com/rest/actions/workflow-runs#re-run-failed-jobs-from-a-workflow-run) |
+
+### 4.1 What limits every `pr` entry
+
+- Only the granted repositories, and every request is in ghgw's audit with the agent's name.
+- No `pr` entry changes code, merges, releases, reports a CI result or starts a workflow of its
+  own choosing: those are hard rules. What is left is noise, misleading text, and whatever
+  automation reacts to pull requests, comments and labels.
+- Everything shows in the repository's timeline and a person can undo it (reopen, edit, remove a
+  label); only the notifications already sent stay.
+- GitHub's secondary rate limits on content creation cap spam until ghgw has per-user rate
+  limits (v1).
+- The table has no edits or deletes of comments and reviews, so an agent cannot rewrite or hide
+  what was said (section 5.3).
+
+Two risks are common to several entries and limited by the admin, not by the table:
+
+- **Automation that trusts the credential's user.** Writes are authored by the PAT's user, often
+  a maintainer. Bots and workflows that act on a maintainer's comment (`/deploy`, `/merge`,
+  `/ok-to-test`) or label (auto-merge labels, labels that let a fork's code run with secrets)
+  obey an agent just as well, and ghgw does not read bodies. The admin should not give `pr` on a
+  repository where a comment or a label from that user merges, deploys or runs untrusted code.
+- **CI runs the agent's code.** A pushed branch, and the pull request opened from it, run the
+  repository's workflows on the agent's code, with whatever secrets those workflows expose. This
+  comes with push access (M5) more than with `pr`. Leaving the "Workflows" permission off the PAT
+  makes GitHub reject pushes that change `.github/workflows/`, so an agent cannot write a new
+  workflow; the existing ones still run its code (open question 7).
+
+### 4.2 Abuse, entry by entry
+
+**`pulls.create`**
+
+- Abuse: pull request spam; a pull request from a branch the agent did not write (any branch of
+  the repository, or a fork's `user:branch`) into any base branch; turning someone's issue into a
+  pull request (`issue`); a misleading title or body that a person merges on trust.
+- Limits: opening a pull request merges nothing, and merging is a hard rule. Code in a branch of
+  the repository got there through the push checks or a person. The `pull_request` workflows it
+  triggers run the same code that the push already ran in most repositories (4.1). Acceptable.
+
+**`pulls.update`**
+
+- Abuse: edit the title and body of any pull request, people's included; close any pull request;
+  change its base branch; turn `maintainer_can_modify` off on a fork's pull request.
+- Limits: the timeline records title and base changes and closes, GitHub keeps the edit history
+  of the body, and a person reverts or reopens. Restricting it to the agent's own pull requests is
+  not possible by path, nor by author: agents and the owner share one GitHub user. Acceptable.
+
+**`issues.create-comment`**
+
+- Abuse: comment spam and `@mention` spam; text that reads as the owner's own words; commands to
+  bots and `issue_comment` workflows (4.1).
+- Limits: the agent cannot edit or delete comments afterwards; people can. Command automation is
+  the admin's to know (4.1). Acceptable with that guidance.
+
+**`pulls.create-review`**
+
+- Abuse: `APPROVE` counts toward required reviews, and toward code owner reviews when the PAT's
+  user is a code owner, so a prompt-injected agent can approve someone else's malicious pull
+  request and a person merges it on trust. `REQUEST_CHANGES` can block a merge until someone
+  dismisses it. Line comment spam.
+- Limits: GitHub does not let a pull request's author approve it, and every pull request an agent
+  opens is authored by the PAT's user, so agents cannot approve their own work. ghgw cannot see
+  `event`, which is in the body. Proposed as is; open question 1 asks whether M7 should read the
+  body and deny `APPROVE`.
+
+**`pulls.create-reply-for-review-comment`**
+
+- Abuse: reply spam; replying "fixed" without fixing.
+- Limits: as for comments. Resolving a thread is GraphQL only, so the reviewer still sees every
+  thread open and checks the answer. Acceptable.
+
+**`issues.create`**
+
+- Abuse: issue spam. With push access GitHub also takes `labels`, `assignees`, `milestone`,
+  `type` and `parent_issue_id` in the body, so a new issue can carry labels (4.1) and assign and
+  notify people. `issues` workflows run, with the default branch's workflow files.
+- Limits: issues change no code and a person closes them; labels behave as with
+  `issues.add-labels`. Acceptable.
+
+**`issues.add-labels`**
+
+- Abuse: label spam on any issue or pull request; labels that drive automation (auto-merge,
+  deploy, "safe to test" labels, see 4.1). GitHub does not document whether a name that does not
+  exist yet is created; M7's end-to-end test should find out.
+- Limits: removing and replacing labels are not in the table, so an agent cannot take off a
+  blocking label (`do-not-merge`) or a person's triage. Label automation is the admin's to know
+  (4.1); open question 5 asks about per-grant label lists. Acceptable with that guidance.
+
+**`actions.re-run-workflow-failed-jobs`**
+
+- Abuse: re-run the failed jobs of any run, deploy and release jobs included, with the jobs that
+  depend on them; burn Actions minutes by re-running in a loop; `enable_debug_logging` makes the
+  runner log more.
+- Limits: a re-run uses the original run's commit, ref and workflow files, and the privileges of
+  the actor who triggered the run, not those of the one who re-runs it
+  ([docs](https://docs.github.com/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs)):
+  it runs no new code and gains nothing. Only runs from the last 30 days can be re-run. Debug logs
+  still mask secrets. Acceptable.
