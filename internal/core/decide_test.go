@@ -3,6 +3,8 @@ package core
 import (
 	"fmt"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +57,9 @@ func testRESTTable(t *testing.T) *RESTTable {
 		{Name: "git.create-ref", Method: "POST", Path: "/repos/{owner}/{repo}/git/refs", Class: ClassCodeChange},
 		{Name: "pulls.merge", Method: "PUT", Path: "/repos/{owner}/{repo}/pulls/{pull_number}/merge", Class: ClassMerge},
 		{Name: "hooks.create", Method: "POST", Path: "/repos/{owner}/{repo}/hooks", Class: ClassAdmin},
+		{Name: "releases.create", Method: "POST", Path: "/repos/{owner}/{repo}/releases", Class: ClassRelease},
+		{Name: "statuses.create", Method: "POST", Path: "/repos/{owner}/{repo}/statuses/{sha}", Class: ClassCIResult},
+		{Name: "repos.dispatch", Method: "POST", Path: "/repos/{owner}/{repo}/dispatches", Class: ClassTrigger},
 		{Name: "users.get", Method: "GET", Path: "/user", Class: ClassUnscoped},
 		{Name: "rate_limit.get", Method: "GET", Path: "/rate_limit", Class: ClassGlobal},
 		{Name: "meta.get", Method: "GET", Path: "/meta", Class: ClassGlobal},
@@ -81,15 +86,9 @@ type refResult struct {
 }
 
 func summarize(d Decision) result {
-	id := func(g *Grant) int {
-		if g == nil {
-			return 0
-		}
-		return g.ID
-	}
-	r := result{Allowed: d.Allowed, Reason: d.Reason, Grant: id(d.Grant)}
+	r := result{Allowed: d.Allowed, Reason: d.Reason, Grant: d.Grant.ID}
 	for _, rd := range d.Refs {
-		r.Refs = append(r.Refs, refResult{Ref: rd.Ref, Allowed: rd.Allowed, Reason: rd.Reason, Grant: id(rd.Grant)})
+		r.Refs = append(r.Refs, refResult{Ref: rd.Ref, Allowed: rd.Allowed, Reason: rd.Reason, Grant: rd.Grant.ID})
 	}
 	return r
 }
@@ -123,10 +122,19 @@ func runDecideTests(t *testing.T, p *Policy, tests []decideTest) {
 	}
 }
 
-// checkSafeExplain checks that explain output has exactly one line for the decision and one per
-// ref, made of printable characters only, whatever bytes the request carried.
+// checkSafeExplain checks that every reason and the explain output are printable, with exactly one
+// line for the decision and one per ref, whatever bytes the request carried.
 func checkSafeExplain(t *testing.T, d Decision) {
 	t.Helper()
+	reasons := []string{d.Reason}
+	for _, rd := range d.Refs {
+		reasons = append(reasons, rd.Reason)
+	}
+	for _, r := range reasons {
+		if !utf8.ValidString(r) || strings.ContainsFunc(r, func(c rune) bool { return !unicode.IsPrint(c) }) {
+			t.Errorf("reason %q has unprintable characters", r)
+		}
+	}
 	out := d.String()
 	lines := strings.Split(out, "\n")
 	if len(lines) != 1+len(d.Refs) {
@@ -690,6 +698,21 @@ func TestDecideREST(t *testing.T) {
 			want: result{Reason: "hooks.create is not allowed: repository administration is not available through ghgw"},
 		},
 		{
+			name: "releases are a hard rule",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "releases.create"},
+			want: result{Reason: "releases.create is not allowed: releases create tags, and tags cannot be pushed through ghgw; ask a person to release"},
+		},
+		{
+			name: "CI results are a hard rule",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "statuses.create"},
+			want: result{Reason: "statuses.create is not allowed: CI results come from CI, not from agents"},
+		},
+		{
+			name: "triggering workflows is a hard rule",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "repos.dispatch"},
+			want: result{Reason: "repos.dispatch is not allowed: triggering workflows and deployments is not available through ghgw; push to a branch and let CI run"},
+		},
+		{
 			name: "repository access is checked before the hard rules",
 			user: "rpi01-agent", repo: "acme/secret", op: REST{Name: "pulls.merge"},
 			want: result{Reason: "rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, nocred/app"},
@@ -830,8 +853,8 @@ func TestDecisionString(t *testing.T) {
 	}
 }
 
-// TestPolicyImmutable changes everything a policy was built from and everything a decision
-// returns, while deciding concurrently (run with -race): decisions do not change.
+// TestPolicyImmutable changes everything a policy was built from, then decides concurrently (run
+// with -race): decisions do not change. Decisions only hold grant identities, which are values.
 func TestPolicyImmutable(t *testing.T) {
 	s := State{
 		Users:  []User{{Name: "a"}, {Name: "b"}},
@@ -873,10 +896,6 @@ func TestPolicyImmutable(t *testing.T) {
 					t.Errorf("Decide(push) = %+v, want %+v", got, wantPush)
 					return
 				}
-				d.Grant.Push[0] = feature
-				d.Grant.Repos[0] = other
-				d.Refs[0].Grant.Push = nil
-				d.Refs[0].Grant.Access = AccessRead
 				if got := summarize(p.Decide(fetch)); !reflect.DeepEqual(got, wantFetch) {
 					t.Errorf("Decide(fetch) = %+v, want %+v", got, wantFetch)
 					return
@@ -888,4 +907,209 @@ func TestPolicyImmutable(t *testing.T) {
 	if g := p.grants["a"][0]; g.Push[0].String() != "agent/**" || g.Repos[0].String() != "bolaum/*" || g.Access != AccessWrite {
 		t.Errorf("the policy's grant changed: %+v", g)
 	}
+}
+
+func TestDecidePushLimits(t *testing.T) {
+	p := testPolicy(t)
+	repo := mustRepo(t, "bolaum/ghgw")
+	updates := func(n int) []RefUpdate {
+		us := make([]RefUpdate, n)
+		for i := range us {
+			us[i] = create(fmt.Sprintf("refs/heads/agent/b%07d", i))
+		}
+		return us
+	}
+
+	d := p.Decide(Request{User: "rpi01-agent", Repo: repo, Op: Push{DefaultBranch: "main", Updates: updates(MaxRefUpdates)}})
+	if !d.Allowed || len(d.Refs) != MaxRefUpdates {
+		t.Errorf("push of %d refs: allowed = %v, %d refs; want allowed", MaxRefUpdates, d.Allowed, len(d.Refs))
+	}
+	d = p.Decide(Request{User: "rpi01-agent", Repo: repo, Op: Push{DefaultBranch: "main", Updates: updates(MaxRefUpdates + 1)}})
+	want := "the push has 1001 ref updates, more than the 1000 allowed; push fewer refs at a time"
+	if d.Allowed || d.Reason != want || len(d.Refs) != MaxRefUpdates+1 || d.Refs[0].Allowed || d.Refs[0].Reason != want {
+		t.Errorf("push of %d refs = %+v, want denied with %q on every ref", MaxRefUpdates+1, summarize(d).Reason, want)
+	}
+
+	longest := "refs/heads/agent/" + strings.Repeat("a", MaxRefNameLen-len("refs/heads/agent/"))
+	tooLong := longest + "a"
+	runDecideTests(t, p, []decideTest{
+		{
+			name: "longest ref name",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(longest)}},
+			want: result{Allowed: true, Reason: "allowed by grant 1 of group agents", Grant: 1,
+				Refs: []refResult{{Ref: longest, Allowed: true, Reason: "allowed by grant 1 of group agents", Grant: 1}}},
+		},
+		{
+			name: "ref name one byte too long",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(tooLong)}},
+			want: result{Reason: "ref name is 1025 bytes, longer than the 1024 allowed; allowed branches: agent/**",
+				Refs: []refResult{{Ref: tooLong, Reason: "ref name is 1025 bytes, longer than the 1024 allowed; allowed branches: agent/**"}}},
+		},
+	})
+	d = p.Decide(Request{User: "rpi01-agent", Repo: repo, Op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(tooLong + "\n")}}})
+	if out := d.String(); len(out) > 3*MaxRefNameLen || !strings.Contains(out, "... (1026 bytes)") {
+		t.Errorf("explain of an oversized ref is %d bytes, want it cut:\n%s", len(out), out)
+	}
+}
+
+// TestDecidePushMemory pushes the most refs allowed with a grant of 1000 repository patterns and a
+// forbidden last ref. Decisions cite grants by identity, so memory grows with the refs only.
+func TestDecidePushMemory(t *testing.T) {
+	repos := make([]string, 1000)
+	for i := range repos {
+		repos[i] = fmt.Sprintf("bolaum/r%04d", i)
+	}
+	p, err := NewPolicy(State{
+		Users:  []User{{Name: "a"}},
+		Grants: []Grant{grant(t, 1, "user a", repos, AccessWrite, []string{"agent/**"}, PresetNone)},
+		Owners: []string{"bolaum"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := make([]RefUpdate, MaxRefUpdates)
+	for i := range updates {
+		updates[i] = create(fmt.Sprintf("refs/heads/agent/b%07d", i))
+	}
+	updates[len(updates)-1] = create("refs/tags/v1")
+	req := Request{User: "a", Repo: mustRepo(t, "bolaum/r0999"), Op: Push{DefaultBranch: "main", Updates: updates}}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	d := p.Decide(req)
+	runtime.ReadMemStats(&after)
+	if d.Allowed {
+		t.Fatal("push with a tag allowed")
+	}
+	// Copying the grant per ref, as before, allocated about 40 MB here; identities need about 0.3 MB.
+	if got := after.TotalAlloc - before.TotalAlloc; got > 2<<20 {
+		t.Errorf("Decide allocated %d bytes, want at most 2 MiB", got)
+	}
+}
+
+// TestDecideUnsafeErrorPaths sends refs with invisible or line-breaking characters and invalid
+// update kinds: every reason is quoted and the raw ref is kept for identity.
+func TestDecideUnsafeErrorPaths(t *testing.T) {
+	p := testPolicy(t)
+	for _, char := range []string{"\u202e", "\u0085", "\u2028", "\u200b"} {
+		for _, kind := range []RefUpdateKind{0, -1, DeleteRef + 1} {
+			ref := "refs/heads/agent/" + char + "evil"
+			t.Run(fmt.Sprintf("%U kind %d", []rune(char)[0], kind), func(t *testing.T) {
+				d := p.Decide(Request{User: "wide", Repo: mustRepo(t, "bolaum/ghgw"),
+					Op: Push{DefaultBranch: "main", Updates: []RefUpdate{{Ref: ref, Kind: kind}}}})
+				reason := "unknown update of " + strconv.QuoteToASCII(ref) + "; allowed branches: **"
+				want := result{Reason: reason, Refs: []refResult{{Ref: ref, Reason: reason}}}
+				if got := summarize(d); !reflect.DeepEqual(got, want) {
+					t.Errorf("Decide() =\n%+v\nwant\n%+v", got, want)
+				}
+				checkSafeExplain(t, d)
+			})
+		}
+	}
+}
+
+// TestDecideGrantIsolation gives a user different grants on two repositories: what one grant
+// allows never applies to the other repository.
+func TestDecideGrantIsolation(t *testing.T) {
+	p, err := NewPolicy(State{
+		Users: []User{{Name: "iso"}},
+		Grants: []Grant{
+			grant(t, 1, "user iso", []string{"o/a"}, AccessRead, nil, PresetRead),
+			grant(t, 2, "user iso", []string{"o/b"}, AccessWrite, []string{"**"}, PresetPR),
+		},
+		Owners: []string{"o"},
+	}, testRESTTable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	push := Push{DefaultBranch: "main", Updates: []RefUpdate{create("refs/heads/x")}}
+	readOnly := "iso has read-only access to o/a; pushing needs a grant with access write"
+	runDecideTests(t, p, []decideTest{
+		{name: "fetch a", user: "iso", repo: "o/a", op: Fetch{}, want: allowedBy(1, "user iso")},
+		{name: "push access a", user: "iso", repo: "o/a", op: PushAccess{}, want: result{Reason: readOnly}},
+		{name: "push a", user: "iso", repo: "o/a", op: push,
+			want: result{Reason: readOnly, Refs: []refResult{{Ref: "refs/heads/x", Reason: readOnly}}}},
+		{name: "create a pull request on a", user: "iso", repo: "o/a", op: REST{Name: "pulls.create"},
+			want: result{Reason: "pulls.create on o/a needs API preset pr; iso has: read (grant 1 of user iso)"}},
+		{name: "create a pull request on b", user: "iso", repo: "o/b", op: REST{Name: "pulls.create"}, want: allowedBy(2, "user iso")},
+	})
+}
+
+// TestDecideMultipleGroups grants different repositories through two groups: members get the
+// union, and a user outside both groups gets neither.
+func TestDecideMultipleGroups(t *testing.T) {
+	p, err := NewPolicy(State{
+		Users:  []User{{Name: "both"}, {Name: "outsider"}},
+		Groups: []Group{{Name: "g1", Members: []string{"both"}}, {Name: "g2", Members: []string{"both"}}},
+		Grants: []Grant{
+			grant(t, 1, "group g1", []string{"o/one"}, AccessRead, nil, PresetNone),
+			grant(t, 2, "group g2", []string{"o/two"}, AccessRead, nil, PresetNone),
+			grant(t, 3, "user outsider", []string{"o/three"}, AccessRead, nil, PresetNone),
+		},
+		Owners: []string{"o"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDecideTests(t, p, []decideTest{
+		{name: "first group", user: "both", repo: "o/one", op: Fetch{}, want: allowedBy(1, "group g1")},
+		{name: "second group", user: "both", repo: "o/two", op: Fetch{}, want: allowedBy(2, "group g2")},
+		{name: "union in the reason", user: "both", repo: "o/three", op: Fetch{},
+			want: result{Reason: "both cannot access o/three. Repositories allowed: o/one, o/two"}},
+		{name: "nonmember, first group", user: "outsider", repo: "o/one", op: Fetch{},
+			want: result{Reason: "outsider cannot access o/one. Repositories allowed: o/three"}},
+		{name: "nonmember, second group", user: "outsider", repo: "o/two", op: Fetch{},
+			want: result{Reason: "outsider cannot access o/two. Repositories allowed: o/three"}},
+	})
+}
+
+// TestDecideUserChecksComeFirst denies unknown and disabled users for every operation, before
+// anything else is looked at.
+func TestDecideUserChecksComeFirst(t *testing.T) {
+	agentX := "refs/heads/agent/x"
+	ops := []struct {
+		name string
+		repo string
+		op   Operation
+	}{
+		{"fetch", "bolaum/ghgw", Fetch{}},
+		{"push access", "bolaum/ghgw", PushAccess{}},
+		{"push", "bolaum/ghgw", Push{DefaultBranch: "main", Updates: []RefUpdate{create(agentX)}}},
+		{"repository REST", "bolaum/ghgw", REST{Name: "pulls.list"}},
+		{"rate_limit", "", REST{Name: "rate_limit.get"}},
+		{"meta", "", REST{Name: "meta.get"}},
+	}
+	var tests []decideTest
+	for _, user := range []struct{ name, reason string }{
+		{"ghost", "unknown user ghost; ask the admin to create it"},
+		{"old-agent", "user old-agent is disabled; ask the admin to enable it"},
+	} {
+		for _, o := range ops {
+			want := result{Reason: user.reason}
+			if _, ok := o.op.(Push); ok {
+				want.Refs = []refResult{{Ref: agentX, Reason: user.reason}}
+			}
+			tests = append(tests, decideTest{name: user.name + " " + o.name, user: user.name, repo: o.repo, op: o.op, want: want})
+		}
+	}
+	tests = append(tests, decideTest{
+		name: "unknown user with unprintable name", user: "gh\x1b[2Jost", repo: "bolaum/ghgw", op: Fetch{},
+		want: result{Reason: `unknown user "gh\x1b[2Jost"; ask the admin to create it`},
+	})
+	runDecideTests(t, testPolicy(t), tests)
+}
+
+// TestDecideRefsNamespaceBranch: patterns cannot start with "refs/" (SPEC.md 6), but a branch
+// literally named "refs/topic" is still a branch, matched by wildcards like any other.
+func TestDecideRefsNamespaceBranch(t *testing.T) {
+	const ref = "refs/heads/refs/topic"
+	push := Push{DefaultBranch: "main", Updates: []RefUpdate{create(ref)}}
+	runDecideTests(t, testPolicy(t), []decideTest{
+		{name: "matched by **", user: "wide", repo: "bolaum/ghgw", op: push,
+			want: result{Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8,
+				Refs: []refResult{{Ref: ref, Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8}}}},
+		{name: "not matched by agent/**", user: "rpi01-agent", repo: "bolaum/ghgw", op: push,
+			want: result{Reason: "push to branch refs/topic is not allowed; allowed branches: agent/**",
+				Refs: []refResult{{Ref: ref, Reason: "push to branch refs/topic is not allowed; allowed branches: agent/**"}}}},
+	})
 }

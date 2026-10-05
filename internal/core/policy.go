@@ -87,7 +87,19 @@ type Grant struct {
 }
 
 // String reads as "grant 2 of group agents".
-func (g Grant) String() string {
+func (g Grant) String() string { return g.identity().String() }
+
+func (g Grant) identity() GrantIdentity { return GrantIdentity{ID: g.ID, Holder: g.Holder} }
+
+// GrantIdentity is how a decision cites a grant: enough to name it and find it, and a value, so
+// a decision never shares or copies the grant's patterns.
+type GrantIdentity struct {
+	ID     int
+	Holder Holder
+}
+
+// String reads as "grant 2 of group agents".
+func (g GrantIdentity) String() string {
 	return fmt.Sprintf("grant %d of %s", g.ID, g.Holder)
 }
 

@@ -15,10 +15,10 @@ type Decision struct {
 	Allowed bool
 	// Reason says which grant allowed the request, or what was denied, why, and what would work.
 	Reason string
-	// Grant is the grant that allowed the request. It is nil on denial, for operations allowed for
-	// every user, and for pushes allowed by more than one grant (Refs then says which grant
+	// Grant is the grant that allowed the request. It is zero on denial, for operations allowed
+	// for every user, and for pushes allowed by more than one grant (Refs then says which grant
 	// allowed each ref).
-	Grant *Grant
+	Grant GrantIdentity
 	// Refs has one entry per ref update of a push, in order: the lines of the receive-pack report.
 	Refs []RefDecision
 }
@@ -30,8 +30,15 @@ type RefDecision struct {
 	Ref     string
 	Allowed bool
 	Reason  string
-	Grant   *Grant
+	Grant   GrantIdentity
 }
+
+// The limits bound the work and memory of a push decision whatever the client sends; a transport
+// should enforce them while parsing, before it holds the updates in memory.
+const (
+	MaxRefUpdates = 1000
+	MaxRefNameLen = 1024
+)
 
 // Decide decides r. Checks run from the most fundamental to the most specific, so the reason is
 // the first thing the agent has to change: the user, then access to the repository, then the hard
@@ -87,6 +94,9 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 	// Both fail closed: a parser or lookup failure upstream must not become an unchecked push.
 	if len(push.Updates) == 0 {
 		return deny(r, "the push has no ref updates, so it cannot be checked")
+	}
+	if len(push.Updates) > MaxRefUpdates {
+		return deny(r, "the push has %d ref updates, more than the %d allowed; push fewer refs at a time", len(push.Updates), MaxRefUpdates)
 	}
 	if checkRefName("refs/heads/"+push.DefaultBranch) != nil {
 		return deny(r, "the default branch of %s is unknown or invalid, so the push cannot be checked; try again", r.Repo)
@@ -184,11 +194,14 @@ func decideRef(u RefUpdate, defaultBranch string, write []*Grant, branches strin
 	deny := func(format string, args ...any) RefDecision {
 		return RefDecision{Ref: u.Ref, Reason: fmt.Sprintf(format, args...) + "; allowed branches: " + branches}
 	}
+	if len(u.Ref) > MaxRefNameLen {
+		return deny("ref name is %d bytes, longer than the %d allowed", len(u.Ref), MaxRefNameLen)
+	}
 	if err := checkRefName(u.Ref); err != nil {
 		return deny("invalid ref name %q: %v", u.Ref, err)
 	}
 	if u.Kind < CreateRef || u.Kind > DeleteRef {
-		return deny("unknown update of %s", u.Ref)
+		return deny("unknown update of %s", printable(u.Ref))
 	}
 	branch, isBranch := strings.CutPrefix(u.Ref, "refs/heads/")
 	switch {
@@ -206,7 +219,7 @@ func decideRef(u RefUpdate, defaultBranch string, write []*Grant, branches strin
 	for _, g := range write {
 		for _, b := range g.Push {
 			if b.Match(branch) {
-				return RefDecision{Ref: u.Ref, Allowed: true, Reason: "allowed by " + g.String(), Grant: g.clone()}
+				return RefDecision{Ref: u.Ref, Allowed: true, Reason: "allowed by " + g.String(), Grant: g.identity()}
 			}
 		}
 	}
@@ -229,10 +242,12 @@ func matchRepo(r Request, grants []*Grant) ([]*Grant, string) {
 	}
 	if len(matching) == 0 {
 		var repos []string
+		seen := make(map[string]bool)
 		for _, g := range grants {
 			for _, rg := range g.Repos {
-				if !slices.Contains(repos, rg.String()) {
-					repos = append(repos, rg.String())
+				if s := rg.String(); !seen[s] {
+					seen[s] = true
+					repos = append(repos, s)
 				}
 			}
 		}
@@ -243,9 +258,11 @@ func matchRepo(r Request, grants []*Grant) ([]*Grant, string) {
 
 func allowedBranches(grants []*Grant) string {
 	var branches []string
+	seen := make(map[string]bool)
 	for _, g := range grants {
 		for _, b := range g.Push {
-			if s := printable(b.String()); !slices.Contains(branches, s) {
+			if s := printable(b.String()); !seen[s] {
+				seen[s] = true
 				branches = append(branches, s)
 			}
 		}
@@ -261,7 +278,7 @@ func listOrNone(items []string) string {
 }
 
 func allow(g *Grant) Decision {
-	return Decision{Allowed: true, Reason: "allowed by " + g.String(), Grant: g.clone()}
+	return Decision{Allowed: true, Reason: "allowed by " + g.String(), Grant: g.identity()}
 }
 
 // deny denies the whole request; for a push, every ref gets the same reason.
@@ -296,8 +313,12 @@ func verdict(allowed bool, reason string) string {
 // printable returns s as is when it is valid UTF-8 made only of printable characters, and quoted
 // in Go syntax (ASCII only) otherwise. Untrusted identifiers go through it before they are
 // rendered, so they cannot add lines, terminal controls or invisible characters (bidi overrides,
-// zero-width spaces) to a reason or to explain output.
+// zero-width spaces, line separators) to a reason or to explain output. Beyond MaxRefNameLen
+// bytes it is cut, so a huge identifier cannot make a huge message.
 func printable(s string) string {
+	if len(s) > MaxRefNameLen {
+		return strconv.QuoteToASCII(s[:MaxRefNameLen]) + fmt.Sprintf("... (%d bytes)", len(s))
+	}
 	if s != "" && utf8.ValidString(s) && !strings.ContainsFunc(s, func(c rune) bool { return !unicode.IsPrint(c) }) {
 		return s
 	}
