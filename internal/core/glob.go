@@ -15,6 +15,7 @@ import (
 //   - The name may contain '*', which matches any run of characters, empty included ("bolaum/*",
 //     "acme/agent-*"). "**" is rejected: names have no '/', so it would only mean '*'.
 //   - Both parts match case-insensitively, like GitHub.
+//   - The name cannot end in ".git" (see ParseRepo).
 //
 // The zero RepoGlob matches nothing.
 type RepoGlob struct {
@@ -42,6 +43,9 @@ func ParseRepoGlob(s string) (RepoGlob, error) {
 	if name == "" || name == "." || name == ".." || literal != "" && !repoNameRE.MatchString(literal) {
 		return RepoGlob{}, fmt.Errorf("repository pattern %q: name must be letters, digits, '.', '-', '_' or '*'", s)
 	}
+	if hasGitSuffix(name) {
+		return RepoGlob{}, fmt.Errorf("repository pattern %q: write the name without the .git suffix", s)
+	}
 	return RepoGlob{text: s, owner: owner, name: compileGlob(name, "(?i)", ".*")}, nil
 }
 
@@ -53,15 +57,18 @@ func (g RepoGlob) Match(r Repo) bool {
 func (g RepoGlob) String() string { return g.text }
 
 // BranchGlob is a push pattern of a grant, matched against branch names without "refs/heads/".
-// It follows GitHub's branch filter patterns:
+// It supports a subset of GitHub's branch filter patterns, with the same meaning:
 //
 //   - '*' matches any run of characters except '/': "agent/*" matches "agent/x", not "agent/x/y".
 //   - "**" matches any run of characters, '/' included: "agent/**" matches "agent/x" and
 //     "agent/x/y" (but not "agent", which is a different branch).
 //   - Everything else is literal and case-sensitive, like git refs.
 //
-// The pattern must be a valid branch name once its stars are taken out (git check-ref-format), so
-// patterns that could never match are rejected instead of silently allowing nothing.
+// GitHub's other special characters ('?', '+', '[', a leading '!') are rejected rather than taken
+// literally, so a pattern copied from GitHub never means something else here. A pattern must admit
+// a valid branch name: with each run of stars replaced by one letter, it must pass git
+// check-ref-format. "a.*.b" and "agent/**" pass; "*.lock" and ".*" never match a valid branch and
+// are rejected instead of silently allowing nothing. Requested refs are validated on their own.
 // The zero BranchGlob matches nothing.
 type BranchGlob struct {
 	text string
@@ -79,7 +86,10 @@ func ParseBranchGlob(s string) (BranchGlob, error) {
 	if strings.Contains(s, "***") {
 		return BranchGlob{}, fmt.Errorf("branch pattern %q: use '*' or '**', not three stars", s)
 	}
-	if err := checkRefName("refs/heads/"+s, true); err != nil {
+	if strings.Contains(s, "+") || strings.HasPrefix(s, "!") {
+		return BranchGlob{}, fmt.Errorf("branch pattern %q: only literals, '*' and '**' are supported", s)
+	}
+	if err := checkRefName("refs/heads/" + starsRE.ReplaceAllString(s, "x")); err != nil {
 		return BranchGlob{}, fmt.Errorf("branch pattern %q: %w", s, err)
 	}
 	return BranchGlob{text: s, re: compileGlob(s, "", "[^/]*")}, nil
@@ -91,6 +101,8 @@ func (g BranchGlob) Match(branch string) bool {
 }
 
 func (g BranchGlob) String() string { return g.text }
+
+var starsRE = regexp.MustCompile(`\*+`)
 
 // compileGlob turns a glob into an anchored regexp: "**" matches anything, '*' matches star.
 // RE2 matches in linear time, so no pattern can make a decision slow.
@@ -114,8 +126,7 @@ func compileGlob(glob, flags, star string) *regexp.Regexp {
 
 // checkRefName applies the rules of git check-ref-format to a full ref name, so that two
 // spellings of one ref (and refs GitHub would interpret differently) never reach a decision.
-// With globs, '*' is allowed.
-func checkRefName(ref string, globs bool) error {
+func checkRefName(ref string) error {
 	switch {
 	case !utf8.ValidString(ref):
 		return errors.New("not valid UTF-8")
@@ -129,7 +140,7 @@ func checkRefName(ref string, globs bool) error {
 		return errors.New(`cannot contain "@{"`)
 	}
 	for _, c := range ref {
-		if c < 0x20 || c == 0x7f || strings.ContainsRune(" ~^:?[\\", c) || c == '*' && !globs {
+		if c < 0x20 || c == 0x7f || strings.ContainsRune(" ~^:?*[\\", c) {
 			return fmt.Errorf("cannot contain %q", c)
 		}
 	}

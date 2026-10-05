@@ -48,6 +48,8 @@ func TestRepoGlob(t *testing.T) {
 		{glob: "bolaum/a?", wantErr: "name must be"},
 		{glob: "bolaum/[ab]", wantErr: "name must be"},
 		{glob: "Bad Owner/x", wantErr: "owner"},
+		{glob: "bolaum/x.git", wantErr: "without the .git suffix"},
+		{glob: "bolaum/*.GIT", wantErr: "without the .git suffix"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.glob, func(t *testing.T) {
@@ -129,11 +131,20 @@ func TestBranchGlob(t *testing.T) {
 			noMatch: []string{"xfeat"},
 		},
 		{
-			// '.' and '+' are literal.
-			glob:    "v1.x+y",
-			match:   []string{"v1.x+y"},
-			noMatch: []string{"v1axxy"},
+			// '.' is literal.
+			glob:    "v1.x",
+			match:   []string{"v1.x"},
+			noMatch: []string{"v1ax"},
 		},
+		{
+			// Admits valid branches ("a.x.b") although an empty star would give "a..b".
+			glob:    "a.*.b",
+			match:   []string{"a.x.b"},
+			noMatch: []string{"a.x/y.b"},
+		},
+		// GitHub's other special characters are rejected, not taken literally.
+		{glob: "v1.x+y", wantErr: "only literals, '*' and '**'"},
+		{glob: "!agent/*", wantErr: "only literals, '*' and '**'"},
 		{glob: "", wantErr: "empty"},
 		{glob: "refs/heads/agent/*", wantErr: "without refs/heads/"},
 		{glob: "agent/***", wantErr: "three stars"},

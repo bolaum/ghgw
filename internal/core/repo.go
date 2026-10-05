@@ -17,8 +17,8 @@ var (
 	principalNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
-// Repo is a GitHub repository, owner/name, without the ".git" suffix. Names keep the case they were
-// given in, for messages; GitHub compares them case-insensitively and so does every match in core.
+// Repo is a GitHub repository, owner/name. Names keep the case they were given in, for messages;
+// GitHub compares them case-insensitively and so does every match in core.
 // The zero Repo means "no repository" (for operations that are not repository-scoped).
 type Repo struct {
 	owner, name string
@@ -36,7 +36,16 @@ func ParseRepo(s string) (Repo, error) {
 	if !repoNameRE.MatchString(name) || name == "." || name == ".." {
 		return Repo{}, fmt.Errorf("repository %q: name must be 1 to 100 letters, digits, '.', '-' or '_'", s)
 	}
+	if hasGitSuffix(name) {
+		return Repo{}, fmt.Errorf("repository %q: write the name without the .git suffix", s)
+	}
 	return Repo{owner: owner, name: name}, nil
+}
+
+// hasGitSuffix reports whether a repository name ends in ".git". Such names are rejected: the
+// transports treat the suffix as optional, so "x.git" must always mean repository "x".
+func hasGitSuffix(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), ".git")
 }
 
 // Owner returns the owner as given.

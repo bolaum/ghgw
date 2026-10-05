@@ -154,7 +154,7 @@ func decideRef(u RefUpdate, defaultBranch string, write []*Grant, branches strin
 	deny := func(format string, args ...any) RefDecision {
 		return RefDecision{Ref: u.Ref, Reason: fmt.Sprintf(format, args...) + "; allowed branches: " + branches}
 	}
-	if err := checkRefName(u.Ref, false); err != nil {
+	if err := checkRefName(u.Ref); err != nil {
 		return deny("invalid ref name %q: %v", u.Ref, err)
 	}
 	if u.Kind < CreateRef || u.Kind > DeleteRef {
