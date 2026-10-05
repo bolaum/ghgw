@@ -93,6 +93,7 @@ internal/core/       domain and decisions; no HTTP; testable on its own
 internal/gateway/    git and REST proxies; calls core
 internal/adminapi/   thin HTTP handlers over core
 internal/store/      state directory: SQLite (modernc.org/sqlite: pure Go, no cgo), master key, sealed credentials
+internal/policyfile/ the policy file (v0): users with key hashes, groups and grants in YAML
 internal/setup/      client side: git and gh configuration, undo, doctor
 pkg/api/             request/response types shared by the admin API and its clients
 pkg/adminclient/     Go client of the admin API (used by the CLI; later the MCP server)
@@ -300,26 +301,47 @@ does not have.
 - User and group names are lowercase (`[a-z0-9][a-z0-9._-]*`, up to 64 characters). A disabled user
   is denied everything.
 
+In v0 the policy is a YAML file that `ghgw serve` reads; the admin edits it (section 9.1). Owners
+and their credentials are not in it: they are in the store (section 7).
+
 ```yaml
 groups:
   agents:
     grants:
-      - repos: ["bolaum/*"]
+      - id: 1                # unique across the file; decisions cite it
+        repos: ["bolaum/*"]
         access: write        # read | write
         push: ["agent/**"]   # branch globs; empty = no push
         api: pr              # read | pr; omitted = no REST
 
 users:
   rpi01-agent:
+    key_hash: sha256:11cde5068fd7c6def7b5e11479296aacb7477d4a0e868862bf3529f4431c487a
     groups: [agents]
   devct01-agent:
+    key_hash: sha256:c672cd293e549b50e8b13342f2f45e408f476315608cc119e5cc6cb7f3e75c31
+    disabled: false          # true denies the user everything
     groups: [agents]
     grants:
-      - repos: ["acme/ml-lab"]
+      - id: 2
+        repos: ["acme/ml-lab"]
         access: write
         push: ["agent/**"]
         api: pr
 ```
+
+- `key_hash` is the SHA-256 of the user's ghgw key, as `ghgw key new` prints it (`sha256:` and 64
+  hex characters); every user has one, and no two users share one. Errors never quote it, in case
+  a secret was pasted there, and redact any ghgw key or admin token YAML errors quote elsewhere.
+- Every grant has an `id`. ghgw cannot see a removed grant in a file, so not reusing IDs is the
+  admin's part: give a new grant an ID no grant has had.
+- A user's `groups` must be defined under `groups`; a group may have no grants.
+- Unknown fields, several YAML documents and files over 1 MiB are rejected. The file must be a
+  regular file that group and others cannot write (they could grant themselves access).
+- An invalid file is rejected as a whole, with every problem listed, one per line: the line for
+  YAML errors (`line 7: field acess not found in type policyfile.grant`), the user, group or grant
+  otherwise (`grant 2 of user devct01-agent: push branches need access write`). An empty file is an
+  empty policy, which denies everything.
 
 A request is allowed when some effective grant matches the repository and allows the operation,
 the owner has a credential, and no hard rule denies it. Checks run from the most fundamental to the
@@ -339,9 +361,16 @@ making the request; for a push it also shows the decision on each ref.
   "Administration". GitHub's permissions cannot stop merges (merging needs Contents write, like
   push), so the merge hard rule is the only barrier. Fine-grained PATs have no "Checks" permission,
   so check runs may only be readable on public repositories.
-- Added from stdin or a file (never as a command-line argument), verified with an API call.
+- Added from stdin or a file (never as a command-line argument), verified with an API call:
+  `GET /users/{owner}` with the token, so GitHub rejects a bad token (401) or an unknown owner (404)
+  before anything is stored. The call cannot tell whether the token's resource owner is that owner.
+  Redirects are not followed, so the token goes only to the API URL. Errors show the answer's
+  status code with its standard text, never the server's reason phrase, and its message with the
+  token redacted; an expiry ghgw cannot read is not quoted. An answer that is not valid HTTP gets
+  a fixed message, since HTTP parsing errors quote it. A server can put the token in any of these.
 - A token is 1 to 1024 visible ASCII characters (no spaces or line breaks: it goes into an HTTP
-  header).
+  header). Surrounding whitespace is trimmed, but input longer than a token and a line break is
+  rejected rather than cut to fit.
 - Encrypted at rest with AES-256-GCM under a master key generated on first start (state directory,
   mode 0600) or given through `GHGW_MASTER_KEY`. The key is 32 random bytes in standard base64,
   the same in the file and in the variable. Each encryption has a random nonce, and the owner
@@ -377,10 +406,40 @@ ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, acm
 
 ## 9. Admin
 
-v0 ships only the local admin commands of milestone M3; the admin API, the admin client and the
-full CLI below are v1 (section 17).
+v0 ships only the local admin commands of section 9.1; the admin API, the admin client and the
+full CLI of sections 9.2 to 9.4 are v1 (section 17).
 
-### 9.1 Admin API
+### 9.1 Local admin (v0)
+
+The admin edits the policy file (section 6) and runs these commands on the gateway host, as the
+user `ghgw serve` runs as:
+
+```
+ghgw key new [--key-file F]                 a new key and the key_hash for the policy file
+ghgw owner add OWNER [--token-file F]       a credential, from stdin or the file (section 7)
+ghgw owner list                             owners and expiry; never the credentials
+ghgw owner remove OWNER
+ghgw explain --user U [--repo O/R] --op OP [--default-branch B] [--ref R]...
+```
+
+- `key new` prints the key once with its `key_hash` line, or writes the key to `--key-file` (a new
+  file, mode 0600; an existing file is never replaced) and prints only the `key_hash` line.
+- `owner add` has no rotation in v0: `owner remove`, then `owner add`. `owner list` marks a
+  credential that expires within 7 days, or has expired.
+- The `owner` commands and `explain` create the state directory and the master key on a new host
+  (section 12), but no admin token: there is no admin API in v0 to use it.
+- `explain` decides from the policy file and the owners in the store. `--op` is `fetch`, `push` or
+  a REST operation name (all unknown until the REST table of M7). `push` without `--ref` asks
+  whether the user may push at all; with `--ref` it decides that push ref by ref, which needs
+  `--default-branch`. A `--ref` is a branch name or a full ref (`refs/tags/v1`); a leading `:` makes
+  it a delete, as in `git push`. The exit status is 0 whatever the decision.
+- The policy file is `--policy`, else `$GHGW_POLICY`, else `$XDG_CONFIG_HOME/ghgw/policy.yaml`. The
+  state directory is `--state-dir`, else `$GHGW_STATE_DIR`, else `$XDG_STATE_HOME/ghgw`. The master
+  key comes from `GHGW_MASTER_KEY` or the state directory (section 7).
+- Every command has `--json` (stable output) and `--help` with examples; none is interactive. A
+  token on a terminal stdin is refused rather than waited for.
+
+### 9.2 Admin API
 
 JSON over HTTPS on the admin listener, `/admin/v1/...`, authenticated with an admin token (`ghgwa_`
 and 64 lowercase hex characters, stored hashed like user keys). On first start (no admin token in
@@ -406,7 +465,7 @@ GET               /admin/v1/audit                 ?user=&repo=&since=&until=&dec
 
 Every mutating route accepts `?dry_run=true` and then returns the change it would make.
 
-### 9.2 CLI
+### 9.3 CLI
 
 ```
 ghgw serve                                  run the gateway and admin listeners
@@ -432,7 +491,7 @@ CLI rules, so people and LLMs can both drive it:
 - A new key is printed once, or written to `--key-file` (mode 0600) so it never has to pass
   through an LLM's context.
 
-### 9.3 Later
+### 9.4 Later
 
 - `ghgw mcp`: an MCP server over stdio on the admin side, a thin layer over `pkg/adminclient`, for
   admin from clients without a shell. Never for the agents being governed.
@@ -476,13 +535,14 @@ logged with `slog` to stdout. Secrets are never logged.
 - Config file (YAML) plus `GHGW_*` environment overrides: listen addresses, TLS, state directory,
   retention.
 - State directory: `$XDG_STATE_HOME/ghgw/` of the service user: `ghgw.db` (SQLite, with its
-  `-wal` and `-shm` files), `master.key` and `admin-token`. ghgw creates the directory with mode
-  0700 and the files with mode 0600 from the start, and never replaces an existing file; a file left
-  partial by an interrupted first start is reported as malformed, with what to do. It refuses to
-  start when the directory or one of these files is a symbolic link, is owned by another user, or
-  gives any permission to group or others; the error names the `chmod` to run. Only the directory
-  itself is checked, not its parents.
+  `-wal` and `-shm` files), `master.key` and, with the admin API, `admin-token`. ghgw creates the
+  directory with mode 0700 and the files with mode 0600 from the start, and never replaces an
+  existing file; a file left partial by an interrupted first start is reported as malformed, with
+  what to do. It refuses to start when the directory or one of these files is a symbolic link, is
+  owned by another user, or gives any permission to group or others; the error names the `chmod` to
+  run. Only the directory itself is checked, not its parents.
 - Dynamic state (users, groups, grants, owners) lives in SQLite and changes through the admin API.
+  In v0 users, groups and grants are in the policy file (section 6) and only owners are in SQLite.
 
 ## 13. TLS
 
@@ -501,7 +561,8 @@ logged with `slog` to stdout. Secrets are never logged.
 ## 15. Implementation choices
 
 - Dependencies: `spf13/cobra` (commands), `charmbracelet/lipgloss` and `charmbracelet/huh` (CLI
-  output and prompts), `modernc.org/sqlite` (store), `gopkg.in/yaml.v3` (config and policy files).
+  output and prompts), `modernc.org/sqlite` (store), `go.yaml.in/yaml/v3` (config and policy files;
+  the maintained successor of `gopkg.in/yaml.v3`). v0 prints tables with `text/tabwriter`.
   Anything else needs a reason in the PR.
 - git protocol: pkt-line parsing and receive-pack reports are written by hand in
   `internal/gateway`; no go-git in v0.
@@ -535,7 +596,7 @@ pull request; "done" means the listed checks pass in CI.
 ## 17. Roadmap
 
 - **v0**: section 16.
-- **v1**: the admin API, `pkg/adminclient` and the full CLI of section 9; audit in the store with
+- **v1**: the admin API, `pkg/adminclient` and the full CLI of section 9.3; audit in the store with
   retention and `ghgw audit`; presets beyond the v0 table (labels with per-grant allowlists,
   reviewers, re-runs, `gh run`); `setup --undo` and `doctor`; `--self-signed`; GraphQL (operation
   allowlist, node ID → owner mapping); `no_force` on grants (ancestry from the pack); GitHub App

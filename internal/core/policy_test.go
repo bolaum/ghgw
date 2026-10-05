@@ -136,6 +136,8 @@ func TestNewPolicyValidation(t *testing.T) {
 				noKind.Holder.Kind = 0
 				tooManyRepos := grant(t, 11, "user rpi01-agent", slices.Repeat(bolaum, MaxGrantPatterns+1), AccessRead, nil, "")
 				tooManyPush := grant(t, 12, "user rpi01-agent", bolaum, AccessWrite, slices.Repeat([]string{"agent/**"}, MaxGrantPatterns+1), "")
+				everything := grant(t, 13, "user ghost", nil, "wrte", []string{"agent/**"}, "wrong")
+				everything.Push = append(everything.Push, BranchGlob{})
 				return State{
 					Users:  users,
 					Groups: groups,
@@ -153,6 +155,7 @@ func TestNewPolicyValidation(t *testing.T) {
 						noKind,
 						tooManyRepos,
 						tooManyPush,
+						everything,
 					},
 				}
 			},
@@ -170,6 +173,11 @@ func TestNewPolicyValidation(t *testing.T) {
 				"grant 10 of holder rpi01-agent: the holder must be a user or a group",
 				"grant 11 of user rpi01-agent: has 101 repository patterns; a grant has at most 100",
 				"grant 12 of user rpi01-agent: has 101 push patterns; a grant has at most 100",
+				"grant 13 of user ghost: user ghost does not exist; create it first",
+				"grant 13 of user ghost: needs at least one repository pattern",
+				"grant 13 of user ghost: access must be read or write, not wrte",
+				"grant 13 of user ghost: api must be read or pr (or empty for none), not wrong",
+				"grant 13 of user ghost: has an empty push pattern",
 			},
 		},
 	}
@@ -185,6 +193,58 @@ func TestNewPolicyValidation(t *testing.T) {
 			checkErrorLines(t, err, tt.wantErr)
 			if p != nil {
 				t.Errorf("NewPolicy() returned a policy with an error")
+			}
+		})
+	}
+}
+
+func TestParseGrant(t *testing.T) {
+	holder := Holder{Kind: HolderGroup, Name: "agents"}
+	tests := []struct {
+		name         string
+		repos, push  []string
+		access       Access
+		api          Preset
+		wantErr      []string
+		repoN, pushN int
+	}{
+		{name: "valid", repos: []string{"bolaum/*", "acme/app"}, push: []string{"agent/**"}, access: AccessWrite, api: PresetPR, repoN: 2, pushN: 1},
+		{
+			name:  "every problem",
+			repos: []string{"*/x", "bolaum/*", "acme/**"}, push: []string{"refs/heads/x", "agent/**"}, access: "wrte", api: "wrong",
+			wantErr: []string{
+				"grant 2 of group agents: repository pattern */x: the owner cannot contain '*'",
+				"grant 2 of group agents: repository pattern acme/**",
+				"grant 2 of group agents: branch pattern refs/heads/x: write the branch name without refs/heads/",
+				"grant 2 of group agents: access must be read or write, not wrte",
+				"grant 2 of group agents: api must be read or pr (or empty for none), not wrong",
+			},
+		},
+		{
+			name: "only bad patterns", repos: []string{"*/x"}, push: []string{"x"}, access: AccessRead,
+			wantErr: []string{
+				"grant 2 of group agents: repository pattern */x",
+				"grant 2 of group agents: push branches need access write",
+			},
+		},
+		{name: "no patterns", access: AccessRead, wantErr: []string{"grant 2 of group agents: needs at least one repository pattern"}},
+		{
+			name: "too many patterns", repos: slices.Repeat([]string{"a/b"}, MaxGrantPatterns+1), push: slices.Repeat([]string{"x"}, MaxGrantPatterns+1), access: AccessWrite,
+			wantErr: []string{
+				"grant 2 of group agents: has 101 repository patterns; a grant has at most 100",
+				"grant 2 of group agents: has 101 push patterns; a grant has at most 100",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g, err := ParseGrant(2, holder, tt.repos, tt.access, tt.push, tt.api)
+			if len(tt.wantErr) > 0 {
+				checkErrorLines(t, err, tt.wantErr)
+				return
+			}
+			if err != nil || len(g.Repos) != tt.repoN || len(g.Push) != tt.pushN || g.ID != 2 || g.Holder != holder || g.Access != tt.access || g.API != tt.api {
+				t.Errorf("ParseGrant() = %+v, %v", g, err)
 			}
 		})
 	}

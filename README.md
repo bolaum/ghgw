@@ -5,7 +5,8 @@ credentials: each agent gets its own ghgw key, and every `git` or `gh` request i
 a deny-by-default policy, sent to GitHub with the repository owner's credential, and audited.
 Agents never hold a GitHub token.
 
-Status: pre-alpha. Nothing works yet beyond `ghgw version`.
+Status: pre-alpha. The local admin commands work (`ghgw key new`, `ghgw owner`, `ghgw explain`;
+SPEC.md section 9.1); the gateway itself does not exist yet.
 
 [SPEC.md](SPEC.md) describes the design and is the source of truth for behavior;
 [CLAUDE.md](CLAUDE.md) is the contributor guide.

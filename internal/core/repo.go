@@ -30,7 +30,7 @@ func ParseRepo(s string) (Repo, error) {
 	if !ok {
 		return Repo{}, fmt.Errorf("repository %s: want owner/name", Printable(s))
 	}
-	if err := checkOwnerName(owner); err != nil {
+	if err := CheckOwnerName(owner); err != nil {
 		return Repo{}, fmt.Errorf("repository %s: %w", Printable(s), err)
 	}
 	if !repoNameRE.MatchString(name) || name == "." || name == ".." {
@@ -61,7 +61,8 @@ func (r Repo) String() string {
 	return r.owner + "/" + r.name
 }
 
-func checkOwnerName(owner string) error {
+// CheckOwnerName checks the name of a GitHub owner (a user or an organization).
+func CheckOwnerName(owner string) error {
 	if !ownerNameRE.MatchString(owner) {
 		return fmt.Errorf("owner %s must be 1 to 100 letters, digits, '-' or '_', starting with a letter or digit", Printable(owner))
 	}

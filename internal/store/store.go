@@ -1,8 +1,8 @@
 // Package store keeps ghgw's state in its state directory: the SQLite database (users, groups,
-// grants, owners and admin tokens), the master key and the first admin token. GitHub credentials
-// are sealed with AES-256-GCM under the master key; ghgw keys and admin tokens are stored as
-// SHA-256 hashes. Every change is validated by building a core.Policy from the result, so the
-// database always holds a valid policy.
+// grants, owners and admin tokens), the master key and, for the admin API, the first admin token.
+// GitHub credentials are sealed with AES-256-GCM under the master key; ghgw keys and admin tokens
+// are stored as SHA-256 hashes. Every change is validated by building a core.Policy from the
+// result, so the database always holds a valid policy.
 package store
 
 import (
@@ -70,13 +70,16 @@ type Options struct {
 	// MasterKey is the master key in base64, from GHGW_MASTER_KEY. When it is zero, the key file
 	// in the state directory is used, created on the first start.
 	MasterKey Secret
+	// AdminToken makes Open create the first admin token when the database has none, for the
+	// admin API (SPEC.md section 9.2). The local admin commands have no use for one.
+	AdminToken bool
 }
 
 // Open opens the store in the state directory dir. It refuses a directory or state file that is
 // not private to the current user. On the first start it creates the directory, the database,
-// the master key file (unless opts gives the key) and the first admin token, all private to the
-// current user; it never replaces an existing master key file. The master key must be the one the
-// database was created with.
+// the master key file (unless opts gives the key) and, with opts.AdminToken, the first admin
+// token, all private to the current user; it never replaces an existing master key file. The
+// master key must be the one the database was created with.
 //
 // adminTokenPath is the admin-token file when this call created the first admin token, for the
 // caller to point the admin to; it is empty otherwise. The token itself is only in that file, so
@@ -119,9 +122,10 @@ func Open(ctx context.Context, dir string, opts Options) (_ *Store, adminTokenPa
 	if err := s.initMasterKey(ctx, dir, opts.MasterKey); err != nil {
 		return nil, "", err
 	}
-	adminTokenPath, err = s.initAdminToken(ctx, dir)
-	if err != nil {
-		return nil, "", err
+	if opts.AdminToken {
+		if adminTokenPath, err = s.initAdminToken(ctx, dir); err != nil {
+			return nil, "", err
+		}
 	}
 	return s, adminTokenPath, nil
 }
