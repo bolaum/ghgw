@@ -380,6 +380,8 @@ ghgw explain --user U [--repo O/R] --op OP [--default-branch B] [--ref R]...
   file, mode 0600; an existing file is never replaced) and prints only the `key_hash` line.
 - `owner add` has no rotation in v0: `owner remove`, then `owner add`. `owner list` marks a
   credential that expires within 7 days, or has expired.
+- The `owner` commands and `explain` create the state directory and the master key on a new host
+  (section 12), but no admin token: there is no admin API in v0 to use it.
 - `explain` decides from the policy file and the owners in the store. `--op` is `fetch`, `push` or
   a REST operation name (all unknown until the REST table of M7). `push` without `--ref` asks
   whether the user may push at all; with `--ref` it decides that push ref by ref, which needs
@@ -487,12 +489,12 @@ logged with `slog` to stdout. Secrets are never logged.
 - Config file (YAML) plus `GHGW_*` environment overrides: listen addresses, TLS, state directory,
   retention.
 - State directory: `$XDG_STATE_HOME/ghgw/` of the service user: `ghgw.db` (SQLite, with its
-  `-wal` and `-shm` files), `master.key` and `admin-token`. ghgw creates the directory with mode
-  0700 and the files with mode 0600 from the start, and never replaces an existing file; a file left
-  partial by an interrupted first start is reported as malformed, with what to do. It refuses to
-  start when the directory or one of these files is a symbolic link, is owned by another user, or
-  gives any permission to group or others; the error names the `chmod` to run. Only the directory
-  itself is checked, not its parents.
+  `-wal` and `-shm` files), `master.key` and, with the admin API, `admin-token`. ghgw creates the
+  directory with mode 0700 and the files with mode 0600 from the start, and never replaces an
+  existing file; a file left partial by an interrupted first start is reported as malformed, with
+  what to do. It refuses to start when the directory or one of these files is a symbolic link, is
+  owned by another user, or gives any permission to group or others; the error names the `chmod` to
+  run. Only the directory itself is checked, not its parents.
 - Dynamic state (users, groups, grants, owners) lives in SQLite and changes through the admin API.
   In v0 users, groups and grants are in the policy file (section 6) and only owners are in SQLite.
 

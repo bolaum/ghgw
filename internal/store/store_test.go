@@ -21,7 +21,7 @@ import (
 func openStore(t *testing.T) (s *Store, dir string, adminToken Secret) {
 	t.Helper()
 	dir = filepath.Join(t.TempDir(), "state")
-	s, tokenPath, err := Open(context.Background(), dir, Options{})
+	s, tokenPath, err := Open(context.Background(), dir, Options{AdminToken: true})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -105,7 +105,7 @@ func TestOpenAgain(t *testing.T) {
 	masterKey := readFile(t, filepath.Join(dir, masterKeyFile))
 	s.Close()
 
-	s2, tokenPath, err := reopen(t, dir, Options{})
+	s2, tokenPath, err := reopen(t, dir, Options{AdminToken: true})
 	if err != nil {
 		t.Fatalf("second Open() error = %v", err)
 	}
@@ -398,6 +398,35 @@ func TestMasterKeyFileKeptOnNewDatabase(t *testing.T) {
 	}
 }
 
+// TestOpenWithoutAdminToken opens a new state directory as the local admin commands do: no admin
+// token until an Open asks for one.
+func TestOpenWithoutAdminToken(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "state")
+	s, tokenPath, err := Open(ctx, dir, Options{})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if tokenPath != "" {
+		t.Errorf("Open() admin token path = %q, want none", tokenPath)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, adminTokenFile)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Lstat(admin-token) error = %v, want ErrNotExist", err)
+	}
+	s.Close()
+
+	s, tokenPath, err = reopen(t, dir, Options{AdminToken: true})
+	if err != nil {
+		t.Fatalf("Open(AdminToken) error = %v", err)
+	}
+	if tokenPath == "" {
+		t.Fatal("Open(AdminToken) created no admin token")
+	}
+	if err := s.AuthenticateAdmin(ctx, readAdminToken(t, dir)); err != nil {
+		t.Errorf("AuthenticateAdmin() error = %v", err)
+	}
+}
+
 func TestLeftoverAdminTokenFile(t *testing.T) {
 	// A token file without a token in the database is never adopted: it may be an earlier
 	// database's token, already shared.
@@ -407,14 +436,17 @@ func TestLeftoverAdminTokenFile(t *testing.T) {
 	for _, f := range []string{dbFile + "-wal", dbFile + "-shm"} {
 		os.Remove(filepath.Join(dir, f))
 	}
-	_, _, err := reopen(t, dir, Options{})
+	if _, _, err := reopen(t, dir, Options{}); err != nil {
+		t.Fatalf("Open() without AdminToken error = %v; only creating a token needs the file gone", err)
+	}
+	_, _, err := reopen(t, dir, Options{AdminToken: true})
 	wantErr(t, err, nil, "admin token file "+dir+"/admin-token exists, but the database has no admin token (an interrupted first start or an earlier database left it); remove it and ghgw creates a new admin token")
 	if got := readFile(t, filepath.Join(dir, adminTokenFile)); string(got) != token.Reveal()+"\n" {
 		t.Error("Open changed the leftover admin token file")
 	}
 
 	remove(t, filepath.Join(dir, adminTokenFile))
-	s, tokenPath, err := reopen(t, dir, Options{})
+	s, tokenPath, err := reopen(t, dir, Options{AdminToken: true})
 	if err != nil {
 		t.Fatalf("Open() after removing the file error = %v", err)
 	}
@@ -557,7 +589,7 @@ func TestConcurrentFirstStart(t *testing.T) {
 	for i := range n {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			stores[i], tokenPaths[i], errs[i] = Open(ctx, dir, Options{})
+			stores[i], tokenPaths[i], errs[i] = Open(ctx, dir, Options{AdminToken: true})
 		}()
 	}
 	for range n {
@@ -634,7 +666,7 @@ func firstStartChild(dir, index string) error {
 	if err != nil {
 		return err
 	}
-	s, tokenPath, err := Open(ctx, dir, Options{})
+	s, tokenPath, err := Open(ctx, dir, Options{AdminToken: true})
 	if err != nil {
 		return err
 	}

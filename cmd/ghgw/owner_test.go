@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -63,6 +65,9 @@ func TestOwners(t *testing.T) {
 
 	if out, err := owner("", "list"); err != nil || out != "no owners; add one with ghgw owner add OWNER\n" {
 		t.Errorf("owner list on an empty store = %q, %v", out, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "admin-token")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("owner list created an admin token: Lstat() error = %v, want ErrNotExist", err)
 	}
 	if out, err := owner(goodToken+"\n", "add", "bolaum", "--api-url", api); err != nil || out != "added the credential of owner bolaum (expires: 2031-01-02 01:04 UTC)\n" {
 		t.Errorf("owner add from stdin = %q, %v", out, err)

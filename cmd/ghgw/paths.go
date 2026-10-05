@@ -53,7 +53,7 @@ func openStore(ctx context.Context, dir string) (*store.Store, error) {
 			return nil, err
 		}
 	}
-	// v0 has no admin API (SPEC.md section 9), so the admin token a first start creates is unused.
+	// No admin token: v0 has no admin API to use it (SPEC.md section 9).
 	s, _, err := store.Open(ctx, dir, store.Options{MasterKey: store.NewSecret(os.Getenv(masterKeyEnv))})
 	return s, err
 }
