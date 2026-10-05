@@ -126,10 +126,10 @@ key.
   rejected, so `/o/x.git` always means repository `x`).
 - The path is parsed once, with the name rules of `core`: owners and repositories are letters,
   digits, `-` and `_` (and `.` in repository names), which leave nothing to escape, so a path sent
-  with any `%`-escape is rejected rather than decoded into another one. The query is exactly `service=git-upload-pack` or `service=git-receive-pack` on
-  the ref advertisement, and empty on the service call; the ref advertisement is a `GET` and the
-  service call a `POST`. Anything else (dumb HTTP included) gets a 400, 404 or 405 that says what
-  ghgw serves.
+  with any `%`-escape is rejected rather than decoded into another one. The ref advertisement is a
+  `GET` without a body and with the query `service=git-upload-pack` or `service=git-receive-pack`
+  exactly; the service call is a `POST` without a query. Anything else (dumb HTTP included) gets a
+  400, 404 or 405 that says what ghgw serves.
 - Forwarded to `https://github.com/<owner>/<repo>.git/...` with the owner's credential as Basic
   auth (`x-access-token:<token>`). The upstream URL is built from the parsed owner and repository
   (with `.git`) and the service, never from the request's path. Bodies are streamed, never buffered

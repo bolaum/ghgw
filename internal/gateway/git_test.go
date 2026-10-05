@@ -3,12 +3,15 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 func TestParseGitRequest(t *testing.T) {
 	tests := []struct {
 		name, method, target string
+		body                 string
+		chunked              bool
 		want                 gitRequest
 		wantRepo             string
 		wantStatus           int
@@ -53,11 +56,17 @@ func TestParseGitRequest(t *testing.T) {
 		{name: "service with query", method: "POST", target: "/bolaum/ghgw/git-upload-pack?x=1", wantStatus: 400},
 		{name: "advertisement with POST", method: "POST", target: "/bolaum/ghgw/info/refs?service=git-upload-pack", wantStatus: 405},
 		{name: "service with GET", method: "GET", target: "/bolaum/ghgw/git-upload-pack", wantStatus: 405},
+		{name: "advertisement with a body", method: "GET", target: "/bolaum/ghgw/info/refs?service=git-upload-pack", body: "x", wantStatus: 400},
+		{name: "advertisement with a chunked body", method: "GET", target: "/bolaum/ghgw/info/refs?service=git-upload-pack", chunked: true, wantStatus: 400},
 		{name: "HEAD", method: "HEAD", target: "/bolaum/ghgw/info/refs?service=git-upload-pack", wantStatus: 405},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseGitRequest(httptest.NewRequest(tt.method, tt.target, nil))
+			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body))
+			if tt.chunked {
+				req.ContentLength = -1
+			}
+			got, err := parseGitRequest(req)
 			if tt.wantStatus != 0 {
 				if err == nil {
 					t.Fatalf("parseGitRequest() = %+v, want status %d", got, tt.wantStatus)

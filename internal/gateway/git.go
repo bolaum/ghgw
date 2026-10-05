@@ -64,6 +64,10 @@ func parseGitRequest(r *http.Request) (gitRequest, *requestError) {
 		if r.Method != http.MethodGet {
 			return gitRequest{}, &requestError{http.StatusMethodNotAllowed, "the ref advertisement is fetched with GET"}
 		}
+		// Only the service call's body is forwarded, and bounded.
+		if r.ContentLength != 0 {
+			return gitRequest{}, &requestError{http.StatusBadRequest, "the ref advertisement is fetched without a body"}
+		}
 	case len(segs) == 4 && segs[0] == "" && (segs[3] == uploadPack || segs[3] == receivePack):
 		q.service = segs[3]
 		if r.Method != http.MethodPost {
