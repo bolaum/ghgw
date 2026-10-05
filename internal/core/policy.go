@@ -36,7 +36,7 @@ type Holder struct {
 
 // String reads as "user rpi01-agent" or "group agents", as in decision reasons.
 func (h Holder) String() string {
-	name := printable(h.Name)
+	name := Printable(h.Name)
 	switch h.Kind {
 	case HolderUser:
 		return "user " + name
@@ -72,6 +72,11 @@ func (p Preset) String() string {
 	}
 	return string(p)
 }
+
+// MaxGrantPatterns bounds the repository patterns and the push patterns of a grant, so a policy
+// (and every decision built from it) stays small whatever the admin sends. Each pattern's length
+// is bounded by its parser.
+const MaxGrantPatterns = 100
 
 // Grant allows a set of repositories. Access governs git; API governs REST, independently, so a
 // review agent can have read access and the pr preset.
@@ -150,7 +155,7 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 			continue
 		}
 		if _, dup := p.users[u.Name]; dup {
-			errs = append(errs, fmt.Errorf("user %s is defined twice", printable(u.Name)))
+			errs = append(errs, fmt.Errorf("user %s is defined twice", Printable(u.Name)))
 			continue
 		}
 		p.users[u.Name] = u
@@ -163,16 +168,16 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 			continue
 		}
 		if _, dup := members[g.Name]; dup {
-			errs = append(errs, fmt.Errorf("group %s is defined twice", printable(g.Name)))
+			errs = append(errs, fmt.Errorf("group %s is defined twice", Printable(g.Name)))
 			continue
 		}
 		members[g.Name] = []string{}
 		for _, m := range g.Members {
 			switch _, ok := p.users[m]; {
 			case !ok:
-				errs = append(errs, fmt.Errorf("group %s: member %s is not a user; create the user first", printable(g.Name), printable(m)))
+				errs = append(errs, fmt.Errorf("group %s: member %s is not a user; create the user first", Printable(g.Name), Printable(m)))
 			case slices.Contains(members[g.Name], m):
-				errs = append(errs, fmt.Errorf("group %s: member %s is listed twice", printable(g.Name), printable(m)))
+				errs = append(errs, fmt.Errorf("group %s: member %s is listed twice", Printable(g.Name), Printable(m)))
 			default:
 				members[g.Name] = append(members[g.Name], m)
 			}
@@ -210,7 +215,7 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 		}
 		key := strings.ToLower(o)
 		if p.owners[key] {
-			errs = append(errs, fmt.Errorf("owner %s is defined twice", printable(o)))
+			errs = append(errs, fmt.Errorf("owner %s is defined twice", Printable(o)))
 			continue
 		}
 		p.owners[key] = true
@@ -241,6 +246,9 @@ func checkGrant(g Grant, users map[string]User, groups map[string][]string) erro
 	if len(g.Repos) == 0 {
 		return fmt.Errorf("%s: needs at least one repository pattern", g)
 	}
+	if len(g.Repos) > MaxGrantPatterns {
+		return fmt.Errorf("%s: has %d repository patterns; a grant has at most %d", g, len(g.Repos), MaxGrantPatterns)
+	}
 	for _, r := range g.Repos {
 		if r.name == nil {
 			return fmt.Errorf("%s: has an empty repository pattern", g)
@@ -253,7 +261,10 @@ func checkGrant(g Grant, users map[string]User, groups map[string][]string) erro
 		}
 	case AccessWrite:
 	default:
-		return fmt.Errorf("%s: access must be read or write, not %s", g, printable(string(g.Access)))
+		return fmt.Errorf("%s: access must be read or write, not %s", g, Printable(string(g.Access)))
+	}
+	if len(g.Push) > MaxGrantPatterns {
+		return fmt.Errorf("%s: has %d push patterns; a grant has at most %d", g, len(g.Push), MaxGrantPatterns)
 	}
 	for _, b := range g.Push {
 		if b.re == nil {
@@ -263,7 +274,7 @@ func checkGrant(g Grant, users map[string]User, groups map[string][]string) erro
 	switch g.API {
 	case PresetNone, PresetRead, PresetPR:
 	default:
-		return fmt.Errorf("%s: api must be read or pr (or empty for none), not %s", g, printable(string(g.API)))
+		return fmt.Errorf("%s: api must be read or pr (or empty for none), not %s", g, Printable(string(g.API)))
 	}
 	return nil
 }

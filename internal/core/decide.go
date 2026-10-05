@@ -56,9 +56,9 @@ func denialf(format string, args ...any) *denial {
 func (p *Policy) Decide(r Request) Decision {
 	switch u, ok := p.users[r.User]; {
 	case !ok:
-		return deny(r, denialf("unknown user %s; ask the admin to create it", printable(r.User)))
+		return deny(r, denialf("unknown user %s; ask the admin to create it", Printable(r.User)))
 	case u.Disabled:
-		return deny(r, denialf("user %s is disabled; ask the admin to enable it", printable(r.User)))
+		return deny(r, denialf("user %s is disabled; ask the admin to enable it", Printable(r.User)))
 	}
 	grants := p.grants[r.User]
 	var d Decision
@@ -75,7 +75,7 @@ func (p *Policy) Decide(r Request) Decision {
 		return deny(r, denialf("unknown operation"))
 	}
 	if d.Allowed && !r.Repo.IsZero() && !p.owners[strings.ToLower(r.Repo.Owner())] {
-		return deny(r, denialf("ghgw has no credential for owner %s; ask the admin to add one", printable(r.Repo.Owner())))
+		return deny(r, denialf("ghgw has no credential for owner %s; ask the admin to add one", Printable(r.Repo.Owner())))
 	}
 	return d
 }
@@ -109,7 +109,7 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 		return deny(r, denialf("the push has %d ref updates, more than the %d allowed; push fewer refs at a time", len(push.Updates), MaxRefUpdates))
 	}
 	if checkRefName("refs/heads/"+push.DefaultBranch) != nil {
-		return deny(r, denialf("the default branch of %s is unknown or invalid, so the push cannot be checked; try again", printable(r.Repo.String())))
+		return deny(r, denialf("the default branch of %s is unknown or invalid, so the push cannot be checked; try again", Printable(r.Repo.String())))
 	}
 
 	d := Decision{Allowed: true, Refs: make([]RefDecision, 0, len(push.Updates))}
@@ -147,11 +147,11 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
 	op, ok := p.rest.lookup(call.Name)
 	if !ok {
-		return deny(r, denialf("unknown operation %s; ghgw only forwards the API operations it knows", printable(call.Name)))
+		return deny(r, denialf("unknown operation %s; ghgw only forwards the API operations it knows", Printable(call.Name)))
 	}
 	// The class is recomputed so a misclassified entry still cannot allow a hard-rule operation.
 	class := op.class()
-	name := printable(op.Name)
+	name := Printable(op.Name)
 	switch class {
 	case ClassUnscoped:
 		return deny(r, denialf("%s is not allowed: %s", name, hardRules[class]))
@@ -176,8 +176,8 @@ func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
 		have = append(have, fmt.Sprintf("%s (%s)", g.API, g))
 	}
 	return deny(r, &denial{
-		reason:   fmt.Sprintf("%s on %s needs API preset %s", name, printable(r.Repo.String()), presetFor(class)),
-		guidance: fmt.Sprintf("; %s has: %s", printable(r.User), boundedList(have)),
+		reason:   fmt.Sprintf("%s on %s needs API preset %s", name, Printable(r.Repo.String()), presetFor(class)),
+		guidance: fmt.Sprintf("; %s has: %s", Printable(r.User), boundedList(have)),
 	})
 }
 
@@ -191,17 +191,17 @@ func decideRef(u RefUpdate, defaultBranch string, write []*Grant) RefDecision {
 		return deny("ref name is %d bytes, longer than the %d allowed", len(u.Ref), MaxRefNameLen)
 	}
 	if err := checkRefName(u.Ref); err != nil {
-		return deny("invalid ref name %s: %v", printable(u.Ref), err)
+		return deny("invalid ref name %s: %v", Printable(u.Ref), err)
 	}
 	if u.Kind < CreateRef || u.Kind > DeleteRef {
-		return deny("unknown update of %s", printable(u.Ref))
+		return deny("unknown update of %s", Printable(u.Ref))
 	}
 	branch, isBranch := strings.CutPrefix(u.Ref, "refs/heads/")
 	switch {
 	case strings.HasPrefix(u.Ref, "refs/tags/"):
 		return deny("pushing tags is not allowed")
 	case !isBranch:
-		return deny("pushing %s is not allowed, only branches can be pushed", printable(u.Ref))
+		return deny("pushing %s is not allowed, only branches can be pushed", Printable(u.Ref))
 	// Case-insensitive on purpose: denying "MAIN" next to "main" costs nothing, and no upstream
 	// quirk can then turn it into a push to the default branch.
 	case strings.EqualFold(branch, defaultBranch) && u.Kind == DeleteRef:
@@ -217,15 +217,15 @@ func decideRef(u RefUpdate, defaultBranch string, write []*Grant) RefDecision {
 		}
 	}
 	if u.Kind == DeleteRef {
-		return deny("deleting branch %s is not allowed", printable(branch))
+		return deny("deleting branch %s is not allowed", Printable(branch))
 	}
-	return deny("push to branch %s is not allowed", printable(branch))
+	return deny("push to branch %s is not allowed", Printable(branch))
 }
 
 // matchRepo returns the grants that match the request's repository, or why there are none.
 func matchRepo(r Request, grants []*Grant) ([]*Grant, *denial) {
 	if r.Repo.IsZero() {
-		return nil, denialf("%s needs a repository", printable(r.Op.operation()))
+		return nil, denialf("%s needs a repository", Printable(r.Op.operation()))
 	}
 	var matching []*Grant
 	for _, g := range grants {
@@ -241,7 +241,7 @@ func matchRepo(r Request, grants []*Grant) ([]*Grant, *denial) {
 			}
 		}
 		return nil, &denial{
-			reason:   fmt.Sprintf("%s cannot access %s", printable(r.User), printable(r.Repo.String())),
+			reason:   fmt.Sprintf("%s cannot access %s", Printable(r.User), Printable(r.Repo.String())),
 			guidance: ". Repositories allowed: " + boundedList(dedupe(repos)),
 		}
 	}
@@ -262,7 +262,7 @@ func writeGrants(r Request, grants []*Grant) ([]*Grant, *denial) {
 		}
 	}
 	if len(write) == 0 {
-		return nil, denialf("%s has read-only access to %s; pushing needs a grant with access write", printable(r.User), printable(r.Repo.String()))
+		return nil, denialf("%s has read-only access to %s; pushing needs a grant with access write", Printable(r.User), Printable(r.Repo.String()))
 	}
 	return write, nil
 }
@@ -313,7 +313,7 @@ func deny(r Request, why *denial) Decision {
 func (d Decision) String() string {
 	lines := []string{verdict(d.Allowed, d.Reason)}
 	for _, rd := range d.Refs {
-		lines = append(lines, "  "+printable(rd.Ref)+": "+verdict(rd.Allowed, rd.Reason))
+		lines = append(lines, "  "+Printable(rd.Ref)+": "+verdict(rd.Allowed, rd.Reason))
 	}
 	return strings.Join(lines, "\n")
 }
