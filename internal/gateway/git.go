@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"strings"
@@ -201,8 +203,16 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, q gitRequest, 
 	if q.advertisement {
 		target.RawQuery = "service=" + q.service
 	} else {
+		if r.ContentLength > g.limits.uploadPackBody {
+			bodyTooLarge(w, g.limits.uploadPackBody)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, g.limits.uploadPackBody)
 	}
+	setDeadline(w, g.limits.request)
+	ctx, cancel := context.WithTimeout(r.Context(), g.limits.request)
+	defer cancel()
+	r = r.WithContext(ctx)
 	log := g.log.With("user", user, "repo", q.repo.String(), "service", q.service)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -210,6 +220,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, q gitRequest, 
 			pr.Out.Host = ""
 			pr.Out.Header = make(http.Header)
 			copyHeaders(pr.Out.Header, pr.In.Header, requestHeaders)
+			pr.Out.Trailer = nil
 			pr.Out.SetBasicAuth("x-access-token", token.Reveal())
 		},
 		Transport: g.transport,
@@ -222,24 +233,65 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, q gitRequest, 
 			h := make(http.Header)
 			copyHeaders(h, resp.Header, responseHeaders)
 			resp.Header = h
+			// Not announced; finalWriter drops them when they arrive.
+			resp.Trailer = nil
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			upstreamFailed(w, r, q, log, err)
 		},
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(&finalWriter{ResponseWriter: w}, r)
 }
 
-// upstreamError is an answer from GitHub that is not passed on to the client.
+// finalWriter passes on the final answer only. ReverseProxy writes the upstream's 1xx answers with
+// their headers and copies its trailers after the body, both outside ModifyResponse: 1xx answers
+// are dropped, and headers set once the status is written (trailers) are discarded.
+type finalWriter struct {
+	http.ResponseWriter
+	// after replaces the header once the status is written.
+	after http.Header
+}
+
+func (f *finalWriter) Header() http.Header {
+	if f.after != nil {
+		return f.after
+	}
+	return f.ResponseWriter.Header()
+}
+
+func (f *finalWriter) WriteHeader(status int) {
+	if status < 200 || f.after != nil {
+		return
+	}
+	f.after = make(http.Header)
+	f.ResponseWriter.WriteHeader(status)
+}
+
+func (f *finalWriter) Write(b []byte) (int, error) {
+	f.WriteHeader(http.StatusOK)
+	return f.ResponseWriter.Write(b)
+}
+
+// Unwrap lets ReverseProxy flush the underlying writer.
+func (f *finalWriter) Unwrap() http.ResponseWriter { return f.ResponseWriter }
+
+func bodyTooLarge(w http.ResponseWriter, limit int64) {
+	fail(w, http.StatusRequestEntityTooLarge, "the request body is larger than the %d bytes ghgw forwards; fetch fewer refs at a time (git fetch origin BRANCH)", limit)
+}
+
+// upstreamError is an answer from GitHub that is not passed on to the client. It holds nothing
+// GitHub wrote, so it can be logged.
 type upstreamError struct {
-	status      int
-	contentType string
+	status int
+	// notGit is a 200 without git's content type.
+	notGit bool
 }
 
 func (e *upstreamError) Error() string {
-	if e.contentType != "" {
-		return fmt.Sprintf("upstream answered %d with content type %s", e.status, core.Printable(e.contentType))
+	if e.notGit {
+		return fmt.Sprintf("upstream answered %d without git's content type", e.status)
 	}
 	return fmt.Sprintf("upstream answered %d", e.status)
 }
@@ -255,9 +307,8 @@ func checkUpstream(resp *http.Response, q gitRequest) error {
 	if q.advertisement {
 		want = "application/x-" + q.service + "-advertisement"
 	}
-	ct := resp.Header.Get("Content-Type")
-	if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != want {
-		return &upstreamError{status: resp.StatusCode, contentType: ct}
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != want {
+		return &upstreamError{status: resp.StatusCode, notGit: true}
 	}
 	return nil
 }
@@ -273,28 +324,50 @@ func upstreamFailed(w http.ResponseWriter, r *http.Request, q gitRequest, log *s
 		// The client went away; nobody reads an answer.
 		return
 	case errors.As(err, &mbe):
-		fail(w, http.StatusRequestEntityTooLarge, "the request body is larger than the %d bytes ghgw forwards", mbe.Limit)
-	case errors.As(err, &ue) && ue.contentType != "":
-		log.Warn("upstream answered an unexpected content type", "error", err)
+		bodyTooLarge(w, mbe.Limit)
+	case errors.As(err, &ue) && ue.notGit:
+		log.Warn("upstream failed", "error", ue.Error())
 		fail(w, http.StatusBadGateway, "GitHub did not answer %s with git data; try again later", repo)
 	case errors.As(err, &ue) && (ue.status == http.StatusUnauthorized || ue.status == http.StatusForbidden):
-		log.Warn("upstream refused the owner's credential", "error", err)
+		log.Warn("upstream refused the owner's credential", "error", ue.Error())
 		fail(w, http.StatusBadGateway, "GitHub refused the credential of owner %s for %s (%d %s); ask the admin to check that it is valid (ghgw owner list) and can read %s",
 			owner, repo, ue.status, http.StatusText(ue.status), repo)
 	case errors.As(err, &ue) && ue.status == http.StatusNotFound:
 		fail(w, http.StatusNotFound, "GitHub has no repository %s that the credential of owner %s can read; check the name, or ask the admin to give the credential access to it",
 			repo, owner)
 	case errors.As(err, &ue) && ue.status >= 300 && ue.status < 400:
-		log.Warn("upstream redirected", "error", err)
+		log.Warn("upstream redirected", "error", ue.Error())
 		fail(w, http.StatusBadGateway, "GitHub redirected the request for %s, and ghgw does not follow redirects; if the repository was renamed or transferred, use its new name", repo)
 	case errors.As(err, &ue):
-		log.Warn("upstream failed", "error", err)
+		log.Warn("upstream failed", "error", ue.Error())
 		fail(w, http.StatusBadGateway, "GitHub answered %d %s for %s; try again later", ue.status, http.StatusText(ue.status), repo)
 	case isTimeout(err):
-		log.Warn("upstream timed out", "error", err)
-		fail(w, http.StatusGatewayTimeout, "GitHub did not answer in time for %s; try again later", repo)
+		log.Warn("upstream timed out")
+		fail(w, http.StatusGatewayTimeout, "the request for %s did not finish in time; try again later", repo)
 	default:
-		log.Warn("cannot reach upstream", "error", err)
+		log.Warn("cannot reach upstream", "error", transportFailure(err))
 		fail(w, http.StatusBadGateway, "cannot reach GitHub for %s; try again later", repo)
 	}
+}
+
+// transportFailure says what kind of transport error err is. The error itself is not logged: its
+// text can quote what the upstream sent, and a broken or hostile upstream can echo the credential.
+func transportFailure(err error) string {
+	var (
+		dnsErr  *net.DNSError
+		opErr   *net.OpError
+		certErr *tls.CertificateVerificationError
+		recErr  tls.RecordHeaderError
+	)
+	switch {
+	case errors.As(err, &dnsErr):
+		return "name lookup failed"
+	case errors.As(err, &certErr):
+		return "the upstream's certificate is not trusted"
+	case errors.As(err, &recErr):
+		return "the upstream does not speak TLS"
+	case errors.As(err, &opErr):
+		return "network error during " + opErr.Op
+	}
+	return "the upstream's answer is not valid HTTP"
 }

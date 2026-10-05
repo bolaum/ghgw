@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strings"
@@ -409,13 +412,28 @@ func TestGatewayUpstreamAnswers(t *testing.T) {
 func TestGatewayLimits(t *testing.T) {
 	e := newTestEnv(t)
 	e.gw.limits.uploadPackBody = 1 << 10
-	t.Run("body too large", func(t *testing.T) {
-		e.upstream.set(gitAnswer)
-		resp, body := e.do(t, "POST", "/bolaum/ghgw.git/git-upload-pack", "rpi01-agent", bytes.NewReader(make([]byte, 1<<20)), nil)
-		if resp.StatusCode != 413 || !strings.HasPrefix(body, "ghgw: the request body is larger than the 1024 bytes ghgw forwards") {
-			t.Errorf("got %d %q, want 413", resp.StatusCode, body)
-		}
-	})
+	for _, tt := range []struct {
+		name string
+		body io.Reader
+		// wantUpstream is whether GitHub sees the start of the request: a body with no length is
+		// only found too large while it is streamed.
+		wantUpstream bool
+	}{
+		{name: "body too large", body: bytes.NewReader(make([]byte, 1<<20))},
+		{name: "chunked body too large", body: io.MultiReader(bytes.NewReader(make([]byte, 1<<20))), wantUpstream: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e.upstream.set(gitAnswer)
+			resp, body := e.do(t, "POST", "/bolaum/ghgw.git/git-upload-pack", "rpi01-agent", tt.body, nil)
+			want := "ghgw: the request body is larger than the 1024 bytes ghgw forwards; fetch fewer refs at a time (git fetch origin BRANCH)\n"
+			if resp.StatusCode != 413 || body != want {
+				t.Errorf("got %d %q, want 413 %q", resp.StatusCode, body, want)
+			}
+			if reqs, _ := e.upstream.got(); !tt.wantUpstream && len(reqs) != 0 {
+				t.Errorf("the upstream got %d requests, want none", len(reqs))
+			}
+		})
+	}
 	t.Run("upstream too slow", func(t *testing.T) {
 		e.gw.transport.ResponseHeaderTimeout = 50 * time.Millisecond
 		release := make(chan struct{})
@@ -427,7 +445,7 @@ func TestGatewayLimits(t *testing.T) {
 			}
 		})
 		resp, body := e.do(t, "GET", advertisement, "rpi01-agent", nil, nil)
-		if resp.StatusCode != 504 || body != "ghgw: GitHub did not answer in time for bolaum/ghgw; try again later\n" {
+		if resp.StatusCode != 504 || body != "ghgw: the request for bolaum/ghgw did not finish in time; try again later\n" {
 			t.Errorf("got %d %q, want 504", resp.StatusCode, body)
 		}
 	})
@@ -504,5 +522,102 @@ func TestNewRefuses(t *testing.T) {
 				t.Errorf("New() error = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestGatewayPassesOnlyTheFinalAnswer(t *testing.T) {
+	e := newTestEnv(t)
+	e.upstream.set(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "early=1")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Del("Set-Cookie")
+		w.Header().Set("Trailer", "X-Declared")
+		gitAnswer(w, r)
+		w.Header().Set("X-Declared", "leak")
+		w.Header().Set(http.TrailerPrefix+"X-Undeclared", "leak")
+	})
+	var early []int
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+			early = append(early, code)
+			return nil
+		},
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", e.url+"/bolaum/ghgw.git/git-upload-pack", io.MultiReader(strings.NewReader("0000")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth("x", e.keys["rpi01-agent"])
+	req.Trailer = http.Header{"Authorization": {"token " + e.keys["rpi01-agent"]}, "X-Client": {"x"}}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "upstream body" {
+		t.Fatalf("got %d %q, want the upstream's answer", resp.StatusCode, body)
+	}
+	if len(early) != 0 || resp.Header.Get("Set-Cookie") != "" {
+		t.Errorf("the client got 1xx answers %v (Set-Cookie %q), want none", early, resp.Header.Get("Set-Cookie"))
+	}
+	if len(resp.Trailer) != 0 || resp.Header.Get("Trailer") != "" {
+		t.Errorf("the client got trailers %v (announced %q), want none", resp.Trailer, resp.Header.Get("Trailer"))
+	}
+	reqs, _ := e.upstream.got()
+	if len(reqs) != 1 || len(reqs[0].Trailer) != 0 {
+		t.Errorf("the upstream got trailers %v, want none", reqs[0].Trailer)
+	}
+}
+
+// TestGatewayBoundsUnforwardedRequests checks that a client that is not forwarded cannot hold a
+// connection with a body it never sends.
+func TestGatewayBoundsUnforwardedRequests(t *testing.T) {
+	e := newTestEnv(t)
+	e.gw.limits.answer = 200 * time.Millisecond
+	for _, auth := range []string{"", "Authorization: token " + e.keys["rpi01-agent"] + "\r\n"} {
+		conn, err := net.Dial("tcp", strings.TrimPrefix(e.url, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		// A push is never forwarded in this milestone; without a key nothing is.
+		_, err = io.WriteString(conn, "POST /bolaum/ghgw.git/git-receive-pack HTTP/1.1\r\nHost: x\r\n"+auth+"Content-Length: 1000\r\n\r\nabc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, _ = io.ReadAll(conn)
+		conn.Close()
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("the connection was held %v, want it bounded by the answer limit", d)
+		}
+	}
+}
+
+func TestGatewayDoesNotLogUpstreamBytes(t *testing.T) {
+	e := newTestEnv(t)
+	// A broken upstream that echoes the credential where a header should be.
+	e.upstream.set(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		buf.WriteString("HTTP/1.1 200 OK\r\nX" + r.Header.Get("Authorization") + "\r\n\r\n")
+		buf.Flush()
+	})
+	resp, body := e.do(t, "GET", advertisement, "rpi01-agent", nil, nil)
+	if resp.StatusCode != 502 || body != "ghgw: cannot reach GitHub for bolaum/ghgw; try again later\n" {
+		t.Errorf("got %d %q, want 502", resp.StatusCode, body)
+	}
+	logs := e.logs.String()
+	encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + ownerToken))
+	if strings.Contains(logs, ownerToken) || strings.Contains(logs, encoded[:20]) {
+		t.Errorf("the log holds the credential: %s", logs)
+	}
+	if !strings.Contains(logs, "the upstream's answer is not valid HTTP") {
+		t.Errorf("logs = %s, want the failure classified", logs)
 	}
 }

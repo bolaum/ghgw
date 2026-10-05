@@ -38,9 +38,12 @@ type Config struct {
 
 // limits bound what one request can cost, whatever the client or the upstream does.
 type limits struct {
-	// request bounds a whole request, reading its body and writing the answer included: a clone
-	// of a large repository fits, a stalled client or upstream does not hold a connection for
-	// ever.
+	// answer bounds a request that is not forwarded, reading what is left of its body included:
+	// an unauthenticated or denied client cannot hold a connection.
+	answer time.Duration
+	// request bounds a forwarded request, reading its body and writing the answer included: a
+	// clone of a large repository fits, a stalled client or upstream does not hold a connection
+	// for ever.
 	request time.Duration
 	// uploadPackBody bounds the body of a fetch negotiation (wants and haves). Real ones are far
 	// smaller, even for repositories with many refs.
@@ -50,6 +53,7 @@ type limits struct {
 }
 
 var defaultLimits = limits{
+	answer:         30 * time.Second,
 	request:        30 * time.Minute,
 	uploadPackBody: 64 << 20,
 	dial:           10 * time.Second,
@@ -126,15 +130,17 @@ func newTransport(rootCAs *x509.CertPool, l limits) *http.Transport {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	deadline := time.Now().Add(g.limits.request)
+	setDeadline(w, g.limits.answer)
+	g.serveGit(w, r)
+}
+
+// setDeadline bounds reading the request and writing the answer to d from now. An error means the
+// connection does not support deadlines (only in tests); contexts still bound the upstream side.
+func setDeadline(w http.ResponseWriter, d time.Duration) {
 	rc := http.NewResponseController(w)
-	// Errors mean the connection does not support deadlines (only in tests); the context still
-	// bounds the upstream side.
+	deadline := time.Now().Add(d)
 	_ = rc.SetReadDeadline(deadline)
 	_ = rc.SetWriteDeadline(deadline)
-	ctx, cancel := context.WithDeadline(r.Context(), deadline)
-	defer cancel()
-	g.serveGit(w, r.WithContext(ctx))
 }
 
 // fail answers a request that is not forwarded. The message reads well after "ghgw: " and says
