@@ -143,7 +143,8 @@ limits while parsing, before holding the commands in memory. A push over 1000 up
 a whole, without a result per ref, whatever else is wrong with it. Refs and other names from the
 request or from policy input go through one renderer before they are shown anywhere (reasons,
 errors, `ng` lines, `explain`): quoted when they contain anything but printable characters, and cut
-beyond 1024 bytes.
+after a whole character or escape so that the rendered name, with the length that follows a cut
+name, is at most 1024 bytes.
 
 A rejected push is answered by ghgw itself with a receive-pack report (`ng <ref> <reason>`, in the
 sideband when negotiated) and nothing reaches GitHub. Pushes are all-or-nothing: if one ref is
@@ -247,7 +248,8 @@ the agent to use the REST API through `gh api`, with an example (section 8). Mos
   GitHub's other special characters (`?`, `+`, `[`, a leading `!`) are rejected rather than taken
   literally. Globs are case-sensitive, like git refs. A glob must admit a valid branch name: with
   each run of stars replaced by one letter it must pass `git check-ref-format` (`a.*.b` passes,
-  `*.lock` and `.*` are rejected). A glob cannot start with `refs/`: that is almost always a full
+  `*.lock` and `.*` are rejected). A glob is at most 1013 bytes, the longest a branch name can be
+  within the 1024-byte ref limit. A glob cannot start with `refs/`: that is almost always a full
   ref name written by mistake (`refs/heads/agent/*`). A branch literally named `refs/...` can only
   be matched by a wildcard such as `**`.
 - `access` governs git and `api` governs REST, independently: a review agent can have
@@ -298,7 +300,8 @@ making the request; for a push it also shows the decision on each ref.
 
 Every denial says what was denied, why, and what would work. The agent reads the message and
 adjusts; no agent-side rules are needed. Lists in messages (allowed repositories, branches, grants)
-are cut at 1 KiB and end with "and N more".
+are at most 1 KiB as rendered, "and N more" included: the first item is always shown, cut if
+needed, and the items that do not fit are counted.
 
 ```
 ! [remote rejected] main -> main (ghgw: push to the default branch is not allowed; allowed branches: agent/**)
