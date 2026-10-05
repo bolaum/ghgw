@@ -160,9 +160,15 @@ branch is looked up through the REST API and cached for a few minutes.
 - `/api/v3/<path>` is forwarded to `https://api.github.com/<path>` with the owner's credential.
 - The owner and repository come from the path (`/repos/{owner}/{repo}/...`).
 - Each request is classified as an operation (method + path template, e.g. `pulls.create`).
-  Unknown operations are denied. Bodies and query strings are not read, with one exception:
-  `pulls.create-review` is forwarded only when its JSON body has `event: COMMENT`, so agents
-  cannot approve or request changes (below).
+  Unknown operations are denied. Bodies and query strings are not read, with two exceptions,
+  checked before anything is forwarded: `pulls.create-review` is forwarded only when its JSON body
+  has `event: COMMENT`, so agents cannot approve or request changes, and `pulls.create` only when
+  its `head` is a branch of the same repository (no `owner:branch`, no `head_repo`), so a pull
+  request cannot show the changes of a repository the grant does not cover. For both, the request
+  has no query string, and the body is at most 1 MiB, valid UTF-8 and exactly one JSON object
+  whose top-level keys stay distinct once escapes are decoded and case is ignored; `pulls.create`
+  takes only the keys `title`, `body`, `head`, `base`, `draft`, `maintainer_can_modify` and
+  `issue`. The forwarded body is the bytes that were checked.
 - `Link` headers (pagination) and `Location` headers are rewritten from `api.github.com` to the
   gateway, so `gh` never sends the ghgw key to GitHub, and a redirect gets a decision of its own
   when the agent follows it. Response bodies are not rewritten. The gateway follows no redirect
@@ -274,6 +280,10 @@ does not have.
   within the 1024-byte ref limit. A glob cannot start with `refs/`: that is almost always a full
   ref name written by mistake (`refs/heads/agent/*`). A branch literally named `refs/...` can only
   be matched by a wildcard such as `**`.
+- A grant on a repository also reaches, by commit SHA, the commits of every repository in its fork
+  network, private forks included: GitHub shares git objects across a network and serves them
+  through each repository, and ghgw cannot tell which repository a SHA came from. Do not grant a
+  repository whose fork network holds forks an agent may not read.
 - `access` governs git and `api` governs REST, independently: a review agent can have
   `access: read` and `api: pr`. `push` globs require `access: write`.
 - User and group names are lowercase (`[a-z0-9][a-z0-9._-]*`, up to 64 characters). A disabled user

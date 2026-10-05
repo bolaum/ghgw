@@ -18,12 +18,20 @@ uses would need waits for v1 (section 7).
 - Every entry passes `NewRESTTable` with its class: canonical path template, `GET` for `read`, and
   no hard-rule family reachable.
 - ghgw classifies a request by method and path (section 5.1). Bodies and query strings are not
-  read, with one exception: the body of `pulls.create-review` (section 5.2). Every other entry is
-  judged on the worst body GitHub accepts for it.
+  read, with two exceptions: the bodies of `pulls.create` and `pulls.create-review` (section 5.2).
+  Every other entry is judged on the worst body GitHub accepts for it.
 - Every request runs with the owner's credential, so on GitHub every write is authored by the
   user who owns the PAT, whichever agent made it. Only ghgw's request log tells which agent it was.
-- Every grant has git access, at least `read`. The REST reads therefore expose no code beyond what
-  a clone gives; what they add is the collaboration data (issues, pull requests, comments) and CI.
+- Every grant has git access, at least `read`. The REST reads therefore expose no code of the
+  granted repositories beyond what a clone gives; what they add is the collaboration data (issues,
+  pull requests, comments) and CI. No entry takes code from another repository: a pull request's
+  source must be a branch of the repository itself (section 5.2).
+- One limit is GitHub's: the repositories of a fork network share their git objects, and GitHub
+  serves a commit of any of them through each of them, given its SHA
+  ([docs](https://docs.github.com/pull-requests/reference/forks)). ghgw cannot tell which
+  repository a SHA came from, so a grant on a repository also reaches, by SHA, the commits of its
+  forks, private ones included. The admin should not grant a repository whose fork network holds
+  forks an agent may not read (SPEC.md section 6).
 
 ## 2. Workflows
 
@@ -111,6 +119,9 @@ gh api -X POST repos/{owner}/{repo}/issues/42/comments \
 gh api -X POST repos/{owner}/{repo}/issues/17/comments -F body=@note.md  # issues.create-comment
 ```
 
+`head` is a branch of the same repository: the gateway denies a source in another repository,
+`owner:branch` or `head_repo` (section 5.2).
+
 Marking a draft pull request ready for review is GraphQL only, so an agent that opens a draft
 leaves that step to a person.
 
@@ -187,7 +198,7 @@ sensitive that is not registered as a secret; whoever may read CI on GitHub read
 
 | Name | Method | Path | Rationale | Docs |
 |---|---|---|---|---|
-| `pulls.create` | POST | `/repos/{owner}/{repo}/pulls` | Open a pull request from a pushed branch. | [docs](https://docs.github.com/rest/pulls/pulls#create-a-pull-request) |
+| `pulls.create` | POST | `/repos/{owner}/{repo}/pulls` | Open a pull request from a pushed branch of the same repository (section 5.2). | [docs](https://docs.github.com/rest/pulls/pulls#create-a-pull-request) |
 | `pulls.update` | PATCH | `/repos/{owner}/{repo}/pulls/{pull_number}` | Keep the title and body current; close a pull request the agent gives up on. | [docs](https://docs.github.com/rest/pulls/pulls#update-a-pull-request) |
 | `issues.create-comment` | POST | `/repos/{owner}/{repo}/issues/{issue_number}/comments` | Comment on a pull request or an issue (the conversation, not a line). | [docs](https://docs.github.com/rest/issues/comments#create-an-issue-comment) |
 | `pulls.create-review` | POST | `/repos/{owner}/{repo}/pulls/{pull_number}/reviews` | Review a pull request: a summary and line comments in one call, `event: COMMENT` only (section 5.2). | [docs](https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request) |
@@ -225,18 +236,24 @@ Two risks are common to several entries and limited by the admin, not by the tab
 
 **`pulls.create`**
 
-- Abuse: pull request spam; a pull request from a branch the agent did not write (any branch of
-  the repository, or a fork's `user:branch`) into any base branch; turning someone's issue into a
-  pull request (`issue`); a misleading title or body that a person merges on trust.
-- Limits: opening a pull request merges nothing, and merging is a hard rule. Code in a branch of
-  the repository got there through the push checks or a person. The `pull_request` workflows it
-  triggers run the same code that the push already ran in most repositories (4.1). Acceptable.
+- Abuse: pull request spam; a pull request from a branch the agent did not write into any base
+  branch; turning someone's issue into a pull request (`issue`); a misleading title or body that a
+  person merges on trust. A source in another repository (`owner:branch`, `head_repo`), such as a
+  private fork the grant does not cover, would expose that repository's changes through the pull
+  request's files and diff, which `read` allows.
+- Limits: the gateway forwards a pull request only when its source is a branch of the repository
+  itself, checked in the body before anything reaches GitHub (section 5.2); sources in other
+  repositories wait for v1 (section 7). Opening a pull request merges nothing, and merging is a
+  hard rule. Code in a branch of the repository got there through the push checks or a person.
+  The `pull_request` workflows it triggers run the same code that the push already ran in most
+  repositories (4.1). Acceptable.
 
 **`pulls.update`**
 
 - Abuse: edit the title and body of any pull request, people's included; close any pull request;
   change its base branch; turn `maintainer_can_modify` off on a fork's pull request.
-- Limits: the timeline records title and base changes and closes, GitHub keeps the edit history
+- Limits: the body takes no source, so the head stays the branch the pull request was opened
+  from. The timeline records title and base changes and closes, GitHub keeps the edit history
   of the body, and a person reverts or reopens. Restricting it to the agent's own pull requests is
   not possible by path, nor by author: agents and the owner share one GitHub user. Acceptable.
 
@@ -276,8 +293,9 @@ Two risks are common to several entries and limited by the admin, not by the tab
 
 ## 5. Requirements for M7
 
-What the tables cannot say on their own: how a request finds its entry, the one body ghgw reads,
-and redirects. SPEC.md section 5.3 states the rules; this section gives the reasons and the tests.
+What the tables cannot say on their own: how a request finds its entry, the two bodies ghgw
+reads, and redirects. SPEC.md section 5.3 states the rules; this section gives the reasons and the
+tests.
 
 ### 5.1 Matching a request to an entry
 
@@ -313,22 +331,28 @@ and redirects. SPEC.md section 5.3 states the rules; this section gives the reas
   (`branches/agent/x/protection`); the gateway checks the families on the concrete path of every
   request, before the table, so those requests are denied by the hard rule.
 
-### 5.2 The body of `pulls.create-review`
+### 5.2 The bodies of `pulls.create` and `pulls.create-review`
 
-The one body ghgw reads, because the path cannot tell a comment from an approval. The gateway
-forwards the request only when all of these hold, and denies it otherwise, before anything reaches
-GitHub:
+The two bodies ghgw reads, because the path cannot tell a comment from an approval, nor a branch
+of the repository from a branch of another one. The gateway forwards these requests only when all
+of these hold, and denies them otherwise, before anything reaches GitHub:
 
-- no query string (GitHub may take `event` from it);
+- no query string (GitHub may take body parameters from it);
 - the body is at most 1 MiB (a review with dozens of line comments is a few KiB) and is read
   whole before forwarding;
 - it is valid UTF-8 and exactly one JSON object, with nothing after it;
-- no top-level key appears twice, and no top-level key other than `event` equals `event` when
-  case is ignored;
-- `event` is present and is the string `COMMENT`.
+- no two top-level keys are equal once JSON escapes are decoded and case is ignored (`event` and
+  `Event`, `head` and `he\u0061d`);
+- the condition of the entry:
+  - `pulls.create-review`: `event` is present and is the string `COMMENT`.
+  - `pulls.create`: every top-level key is one of `title`, `body`, `head`, `base`, `draft`,
+    `maintainer_can_modify` and `issue`, so `head_repo` is denied; `head` is present and is a
+    string without `:`, so `owner:branch` is denied. Git branch names cannot contain `:`, so this
+    denies no branch of the repository.
 
-The forwarded body is the bytes that were checked. The denial says that ghgw allows comment-only
-reviews and shows the body of section 2.7.
+The forwarded body is the bytes that were checked. The denial says what ghgw allows and shows the
+body of section 2.6 or 2.7. A source in another repository would need a decision of its own on
+that repository; v0 leaves it out (section 7).
 
 ### 5.3 Redirects
 
@@ -354,6 +378,13 @@ M7's tests cover, against the fake GitHub:
   string, two `event` keys (equal or conflicting), `Event` next to `event`, `event` in the query
   string, invalid JSON, trailing data and a body over 1 MiB: denied, and no request reaches the
   upstream. A `COMMENT` review is forwarded byte for byte.
+- `pulls.create` with a granted destination and a source in a private fork the agent has no grant
+  on (`"head": "o:main", "head_repo": "o/secret"`), and with `head` `o:main`, `o/secret:main` or
+  `agent:fix`, `head_repo` alone (even naming the same repository), `Head_Repo`, `he\u0061d_repo`,
+  an unknown key, two `head` keys (equal or conflicting), `Head` next to `head`, no `head`, `head`
+  that is not a string, `head_repo` in the query string, invalid JSON, trailing data and a body
+  over 1 MiB: denied, and no request reaches the upstream. `{"head": "agent/fix-42", "base":
+  "main", "title": "..."}` is forwarded byte for byte with `api: pr`, and denied with `api: read`.
 - `branches/main/protection`, `branches/agent/x/protection`, `branches/main%2Fprotection` and
   `branches/main%252Fprotection`: denied, and no request reaches the upstream.
   `branches/agent/fix-42` and `branches/agent%2Ffix-42` are `repos.get-branch` of `agent/fix-42`.
@@ -444,6 +475,7 @@ own review of abuse cases before it joins a preset.
 |---|---|---|
 | `issues.add-labels`, `issues.list-labels-for-repo`, `issues.get-label` | Labels can drive merges, deploys and CI with secrets (auto-merge labels, labels that let a fork's code run with secrets). | Per-grant label allowlists, checked in the body. |
 | `issues.create` | With push access GitHub takes `labels`, `assignees`, `milestone`, `type` and `parent_issue_id` in the body, so a new issue could carry the labels v0 leaves out, and assign and notify people. Not needed to work on pull requests. | The label allowlists above, and a decision on the other body fields. |
+| Pull requests from another repository (`head` `owner:branch`, `head_repo`) | The source is a second repository, which the grant may not cover: its changes would show in the pull request's files and diff. Agents push to the repository they open the pull request in. | Resolving the source repository as GitHub does and requiring the calling agent's own read grant on it; another user's grant must not suffice. |
 | `pulls.request-reviewers`, `pulls.remove-requested-reviewers`, `pulls.rerequest-reviewers` | Notifies people the agent picks. | A decision on who an agent may ask. |
 | `actions.re-run-workflow`, `actions.re-run-job-for-workflow-run` | They re-run successful jobs too, e.g. a deploy. | A way to limit them to failed jobs, or a reason to accept the risk. |
 | `repos.list-releases`, `repos.get-release`, `repos.get-latest-release`, `repos.get-release-by-tag`, release assets | Not needed to work on pull requests. | Path matching for tags (`{tag}` spans segments); assets are binary downloads. |
