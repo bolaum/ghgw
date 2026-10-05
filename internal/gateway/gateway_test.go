@@ -99,6 +99,13 @@ func (f *fakeUpstream) set(h http.HandlerFunc) {
 	f.requests, f.bodies = nil, nil
 }
 
+// reset forgets the requests the upstream got.
+func (f *fakeUpstream) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests, f.bodies = nil, nil
+}
+
 func (f *fakeUpstream) got() ([]*http.Request, [][]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -179,6 +186,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		PolicyPath: e.policyPath,
 		Store:      s,
 		GitURL:     e.upstream.srv.URL,
+		APIURL:     e.upstream.srv.URL,
 		RootCAs:    roots,
 		Logger:     slog.New(slog.NewTextHandler(e.logs, nil)),
 	})
@@ -513,15 +521,19 @@ func TestNewRefuses(t *testing.T) {
 		cfg     Config
 		wantErr string
 	}{
-		{name: "plain http upstream", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "http://github.com"},
+		{name: "plain http upstream", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "http://github.com", APIURL: DefaultAPIURL},
 			wantErr: "upstream URL http://github.com: want https://host[:port], nothing else"},
-		{name: "upstream with credentials", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://u:p@github.com"},
+		{name: "upstream with credentials", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://u:p@github.com", APIURL: DefaultAPIURL},
 			wantErr: "upstream URL https://u:xxxxx@github.com: want https://host[:port], nothing else"},
-		{name: "upstream with a path", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://github.com/x"},
+		{name: "upstream with a path", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://github.com/x", APIURL: DefaultAPIURL},
 			wantErr: "want https://host[:port]"},
-		{name: "missing policy", cfg: Config{PolicyPath: filepath.Join(t.TempDir(), "none.yaml"), Store: e.store, GitURL: DefaultGitURL},
+		{name: "plain http API", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: DefaultGitURL, APIURL: "http://api.github.com"},
+			wantErr: "upstream URL http://api.github.com: want https://host[:port], nothing else"},
+		{name: "no API", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: DefaultGitURL},
+			wantErr: "upstream URL : want https://host[:port], nothing else"},
+		{name: "missing policy", cfg: Config{PolicyPath: filepath.Join(t.TempDir(), "none.yaml"), Store: e.store, GitURL: DefaultGitURL, APIURL: DefaultAPIURL},
 			wantErr: "read the policy file: stat"},
-		{name: "invalid policy", cfg: Config{PolicyPath: invalid, Store: e.store, GitURL: DefaultGitURL},
+		{name: "invalid policy", cfg: Config{PolicyPath: invalid, Store: e.store, GitURL: DefaultGitURL, APIURL: DefaultAPIURL},
 			wantErr: "is invalid; fix it and run again"},
 	}
 	for _, tt := range tests {

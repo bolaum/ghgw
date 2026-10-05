@@ -127,7 +127,7 @@ users:
 	go func() {
 		done <- serve(ctx, serveOptions{
 			certFile: certFile, keyFile: keyFile, policy: policy, stateDir: stateDir,
-			gitURL: upstream.URL, rootCAs: upstreamRoots,
+			gitURL: upstream.URL, apiURL: upstream.URL, rootCAs: upstreamRoots,
 		}, ln, slog.New(slog.NewJSONHandler(logs, nil)))
 	}()
 
@@ -204,7 +204,7 @@ func TestServeErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tt.o.gitURL = "https://github.com"
+			tt.o.gitURL, tt.o.apiURL = "https://github.com", "https://api.github.com"
 			err = serve(context.Background(), tt.o, ln, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
 				t.Errorf("serve() = %v, want %q", err, tt.wantErr)

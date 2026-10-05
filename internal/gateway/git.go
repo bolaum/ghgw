@@ -102,17 +102,7 @@ func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
 		fail(w, perr.status, "%s", perr.msg)
 		return
 	}
-	snap, err := g.policy.current(r.Context())
-	// The errors are in the log; they may name paths and policy details the agent has no use for.
-	switch {
-	case errors.Is(err, errStore):
-		fail(w, http.StatusServiceUnavailable, "the gateway cannot read its store, so every request is denied; try again later, or ask the admin to check the gateway's log")
-		return
-	case err != nil:
-		fail(w, http.StatusServiceUnavailable, "the gateway has no valid policy, so every request is denied; ask the admin to fix the policy file (the gateway's log says what is wrong)")
-		return
-	}
-	user, ok := authenticate(w, r, snap)
+	snap, user, ok := g.authenticate(w, r, fail)
 	if !ok {
 		return
 	}
@@ -129,37 +119,57 @@ func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotImplemented, "this gateway does not accept pushes yet; ask the admin")
 		return
 	}
-	token, err := g.store.Credential(r.Context(), q.repo.Owner())
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		// Removed since the policy was read.
-		fail(w, http.StatusForbidden, "ghgw has no credential for owner %s; ask the admin to add one", core.Printable(q.repo.Owner()))
-		return
-	case err != nil:
-		g.log.Error("cannot read a credential", "owner", q.repo.Owner(), "error", err)
-		fail(w, http.StatusInternalServerError, "the gateway cannot use the credential of owner %s; ask the admin to check the gateway's log", core.Printable(q.repo.Owner()))
+	token, ok := g.credential(w, r, q.repo, fail)
+	if !ok {
 		return
 	}
 	g.forward(w, r, q, user, token)
 }
 
-// authenticate returns the user whose ghgw key r carries, or answers 401 (SPEC.md section 5.1).
-func authenticate(w http.ResponseWriter, r *http.Request, snap *snapshot) (string, bool) {
+// authenticate returns the policy in force and the user whose ghgw key r carries, or answers 503
+// (no policy) or 401 (SPEC.md section 5.1).
+func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, answer answerFunc) (*snapshot, string, bool) {
+	snap, err := g.policy.current(r.Context())
+	// The errors are in the log; they may name paths and policy details the agent has no use for.
+	switch {
+	case errors.Is(err, errStore):
+		answer(w, http.StatusServiceUnavailable, "the gateway cannot read its store, so every request is denied; try again later, or ask the admin to check the gateway's log")
+		return nil, "", false
+	case err != nil:
+		answer(w, http.StatusServiceUnavailable, "the gateway has no valid policy, so every request is denied; ask the admin to fix the policy file (the gateway's log says what is wrong)")
+		return nil, "", false
+	}
 	key, given := keyFrom(r.Header)
 	if !given {
 		// Basic: git asks its credential helper (ghgw credential) only after this challenge.
 		w.Header().Set("WWW-Authenticate", `Basic realm="ghgw"`)
-		fail(w, http.StatusUnauthorized, "this gateway needs a ghgw key; ask the admin for one and run ghgw setup with it")
-		return "", false
+		answer(w, http.StatusUnauthorized, "this gateway needs a ghgw key; ask the admin for one and run ghgw setup with it")
+		return nil, "", false
 	}
 	if hash, ok := store.HashUserKey(key); ok {
 		if user, ok := snap.file.UserByKeyHash(hash); ok {
-			return user, true
+			return snap, user, true
 		}
 	}
 	w.Header().Set("WWW-Authenticate", `Basic realm="ghgw"`)
-	fail(w, http.StatusUnauthorized, "unknown ghgw key; run ghgw setup again with the key the admin gave you, or ask the admin for a new one")
-	return "", false
+	answer(w, http.StatusUnauthorized, "unknown ghgw key; run ghgw setup again with the key the admin gave you, or ask the admin for a new one")
+	return nil, "", false
+}
+
+// credential returns the credential of the owner of repo, or answers why there is none.
+func (g *Gateway) credential(w http.ResponseWriter, r *http.Request, repo core.Repo, answer answerFunc) (store.Secret, bool) {
+	token, err := g.store.Credential(r.Context(), repo.Owner())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Removed since the policy was read.
+		answer(w, http.StatusForbidden, "ghgw has no credential for owner %s; ask the admin to add one", core.Printable(repo.Owner()))
+		return store.Secret{}, false
+	case err != nil:
+		g.log.Error("cannot read a credential", "owner", repo.Owner(), "error", err)
+		answer(w, http.StatusInternalServerError, "the gateway cannot use the credential of owner %s; ask the admin to check the gateway's log", core.Printable(repo.Owner()))
+		return store.Secret{}, false
+	}
+	return token, true
 }
 
 // keyFrom returns the ghgw key in h: the password of Basic authentication (git; the username is
