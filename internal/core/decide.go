@@ -40,6 +40,9 @@ const (
 	MaxRefNameLen = 1024
 )
 
+// anotherRef is the reason of a ref that is allowed in a push denied for another ref.
+const anotherRef = "another ref was rejected"
+
 // denial is why a request is denied: a short reason, and guidance that the decision's reason
 // carries once (each ref of a push gets the short reason only).
 type denial struct {
@@ -108,7 +111,7 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 	if len(push.Updates) > MaxRefUpdates {
 		return deny(r, denialf("the push has %d ref updates, more than the %d allowed; push fewer refs at a time", len(push.Updates), MaxRefUpdates))
 	}
-	if checkRefName("refs/heads/"+push.DefaultBranch) != nil {
+	if defaultRef := "refs/heads/" + push.DefaultBranch; len(defaultRef) > MaxRefNameLen || checkRefName(defaultRef) != nil {
 		return deny(r, denialf("the default branch of %s is unknown or invalid, so the push cannot be checked; try again", Printable(r.Repo.String())))
 	}
 
@@ -123,7 +126,7 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 	if !d.Allowed {
 		for i, rd := range d.Refs {
 			if rd.Allowed {
-				d.Refs[i] = RefDecision{Ref: rd.Ref, Reason: "another ref was rejected"}
+				d.Refs[i] = RefDecision{Ref: rd.Ref, Reason: anotherRef}
 			}
 		}
 		return d
@@ -306,6 +309,21 @@ func deny(r Request, why *denial) Decision {
 		}
 	}
 	return d
+}
+
+// RefReasons returns the reason to report for each ref of a push, in order: the lines of a
+// receive-pack report. Each ref has its own short reason, except the first ref denied for a reason
+// of its own, which has the push's reason: the guidance (allowed branches) is reported once.
+func (d Decision) RefReasons() []string {
+	reasons := make([]string, len(d.Refs))
+	guided := d.Allowed
+	for i, rd := range d.Refs {
+		reasons[i] = rd.Reason
+		if !guided && !rd.Allowed && rd.Reason != anotherRef {
+			reasons[i], guided = d.Reason, true
+		}
+	}
+	return reasons
 }
 
 // String renders the decision for explain: the decision and its reason, then one line per ref of

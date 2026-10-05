@@ -31,7 +31,8 @@ func (PushAccess) operation() string { return "push" }
 // pushes are all-or-nothing.
 type Push struct {
 	// DefaultBranch is the repository's default branch, without "refs/heads/". A push is denied
-	// when it is empty or not a valid branch name: the default branch rule could not be checked.
+	// when it is empty, not a valid branch name or too long for a ref: the default branch rule
+	// could not be checked.
 	DefaultBranch string
 	// Updates are the ref update commands in the order the client sent them. A push without
 	// updates is denied: it would authorize nothing that was checked.

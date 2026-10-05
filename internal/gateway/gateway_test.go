@@ -14,6 +14,7 @@ import (
 	"net/http/httptrace"
 	"net/textproto"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -99,17 +100,28 @@ func (f *fakeUpstream) set(h http.HandlerFunc) {
 	f.requests, f.bodies = nil, nil
 }
 
+// reset forgets the requests the upstream got.
+func (f *fakeUpstream) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests, f.bodies = nil, nil
+}
+
 func (f *fakeUpstream) got() ([]*http.Request, [][]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.requests, f.bodies
 }
 
-// gitAnswer answers like GitHub's git endpoints.
+// gitAnswer answers like GitHub's git endpoints, and its API for the default branch (main).
 func gitAnswer(w http.ResponseWriter, r *http.Request) {
-	ct := "application/x-git-upload-pack-result"
+	if strings.HasPrefix(r.URL.Path, "/repos/") {
+		apiAnswer(w, r)
+		return
+	}
+	ct := "application/x-" + path.Base(r.URL.Path) + "-result"
 	if strings.HasSuffix(r.URL.Path, "/info/refs") {
-		ct = "application/x-git-upload-pack-advertisement"
+		ct = "application/x-" + r.URL.Query().Get("service") + "-advertisement"
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "no-cache")
@@ -179,6 +191,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		PolicyPath: e.policyPath,
 		Store:      s,
 		GitURL:     e.upstream.srv.URL,
+		APIURL:     e.upstream.srv.URL,
 		RootCAs:    roots,
 		Logger:     slog.New(slog.NewTextHandler(e.logs, nil)),
 	})
@@ -243,8 +256,6 @@ func TestGatewayDenials(t *testing.T) {
 			wantStatus: 403, wantBody: "ghgw: user off-agent is disabled; ask the admin to enable it\n"},
 		{name: "owner without credential", method: "GET", path: "/acme/app.git/info/refs?service=git-upload-pack", user: "acme-agent",
 			wantStatus: 403, wantBody: "ghgw: ghgw has no credential for owner acme; ask the admin to add one\n"},
-		{name: "push", method: "GET", path: "/bolaum/pushable.git/info/refs?service=git-receive-pack", user: "rpi01-agent",
-			wantStatus: 501, wantBody: "ghgw: this gateway does not accept pushes yet"},
 		{name: "push with read-only access", method: "POST", path: "/bolaum/ghgw.git/git-receive-pack", user: "rpi01-agent",
 			wantStatus: 403, wantBody: "ghgw: rpi01-agent has read-only access to bolaum/ghgw; pushing needs a grant with access write\n"},
 		{name: "push by a disabled user", method: "GET", path: "/bolaum/pushable.git/info/refs?service=git-receive-pack", user: "off-agent",
@@ -513,15 +524,19 @@ func TestNewRefuses(t *testing.T) {
 		cfg     Config
 		wantErr string
 	}{
-		{name: "plain http upstream", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "http://github.com"},
+		{name: "plain http upstream", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "http://github.com", APIURL: DefaultAPIURL},
 			wantErr: "upstream URL http://github.com: want https://host[:port], nothing else"},
-		{name: "upstream with credentials", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://u:p@github.com"},
+		{name: "upstream with credentials", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://u:p@github.com", APIURL: DefaultAPIURL},
 			wantErr: "upstream URL https://u:xxxxx@github.com: want https://host[:port], nothing else"},
-		{name: "upstream with a path", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://github.com/x"},
+		{name: "upstream with a path", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: "https://github.com/x", APIURL: DefaultAPIURL},
 			wantErr: "want https://host[:port]"},
-		{name: "missing policy", cfg: Config{PolicyPath: filepath.Join(t.TempDir(), "none.yaml"), Store: e.store, GitURL: DefaultGitURL},
+		{name: "plain http API", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: DefaultGitURL, APIURL: "http://api.github.com"},
+			wantErr: "upstream URL http://api.github.com: want https://host[:port], nothing else"},
+		{name: "no API", cfg: Config{PolicyPath: e.policyPath, Store: e.store, GitURL: DefaultGitURL},
+			wantErr: "upstream URL : want https://host[:port], nothing else"},
+		{name: "missing policy", cfg: Config{PolicyPath: filepath.Join(t.TempDir(), "none.yaml"), Store: e.store, GitURL: DefaultGitURL, APIURL: DefaultAPIURL},
 			wantErr: "read the policy file: stat"},
-		{name: "invalid policy", cfg: Config{PolicyPath: invalid, Store: e.store, GitURL: DefaultGitURL},
+		{name: "invalid policy", cfg: Config{PolicyPath: invalid, Store: e.store, GitURL: DefaultGitURL, APIURL: DefaultAPIURL},
 			wantErr: "is invalid; fix it and run again"},
 	}
 	for _, tt := range tests {
@@ -584,14 +599,20 @@ func TestGatewayPassesOnlyTheFinalAnswer(t *testing.T) {
 func TestGatewayBoundsUnforwardedRequests(t *testing.T) {
 	e := newTestEnv(t)
 	e.gw.limits.answer = 200 * time.Millisecond
-	for _, auth := range []string{"", "Authorization: token " + e.keys["rpi01-agent"] + "\r\n"} {
+	auth := "Authorization: token " + e.keys["rpi01-agent"] + "\r\n"
+	for _, tt := range []struct{ repo, auth string }{
+		// Without a key nothing is forwarded, nor a push the user cannot make.
+		{repo: "bolaum/pushable"},
+		{repo: "bolaum/ghgw", auth: auth},
+		// A push is forwarded only once its command list is read, and this one never ends.
+		{repo: "bolaum/pushable", auth: auth},
+	} {
 		conn, err := net.Dial("tcp", strings.TrimPrefix(e.url, "http://"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		start := time.Now()
-		// A push is never forwarded in this milestone; without a key nothing is.
-		_, err = io.WriteString(conn, "POST /bolaum/ghgw.git/git-receive-pack HTTP/1.1\r\nHost: x\r\n"+auth+"Content-Length: 1000\r\n\r\nabc")
+		_, err = io.WriteString(conn, "POST /"+tt.repo+".git/git-receive-pack HTTP/1.1\r\nHost: x\r\n"+tt.auth+"Content-Length: 1000\r\n\r\n0032abc")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -445,6 +445,18 @@ func TestDecidePush(t *testing.T) {
 				deniedRef(agentX, "the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again")),
 		},
 		{
+			name: "default branch longer than a ref",
+			user: "wide", repo: "bolaum/ghgw", op: Push{DefaultBranch: strings.Repeat("x", MaxRefNameLen-len("refs/heads/")+1), Updates: []RefUpdate{update(agentX)}},
+			want: deniedPush("the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again",
+				deniedRef(agentX, "the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again")),
+		},
+		{
+			name: "longest default branch",
+			user: "wide", repo: "bolaum/ghgw", op: Push{DefaultBranch: strings.Repeat("x", MaxRefNameLen-len("refs/heads/")), Updates: []RefUpdate{update(agentX)}},
+			want: result{Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8,
+				Refs: []refResult{{Ref: agentX, Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8}}},
+		},
+		{
 			name: "no repository",
 			user: "rpi01-agent", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(agentX)}},
 			want: deniedPush("push needs a repository", deniedRef(agentX, "push needs a repository")),
@@ -955,6 +967,43 @@ func TestDecisionString(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := p.Decide(tt.req).String(); got != tt.want {
 				t.Errorf("String() =\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecisionRefReasons checks the reasons of a receive-pack report: the push's reason, with its
+// guidance, goes once to the ref the push was denied for, wherever it is.
+func TestDecisionRefReasons(t *testing.T) {
+	p := testPolicy(t)
+	const (
+		guided  = "push to the default branch is not allowed; allowed branches: agent/**"
+		main    = "push to the default branch is not allowed"
+		tag     = "pushing tags is not allowed"
+		another = "another ref was rejected"
+		access  = "rpi01-agent cannot access acme/secret"
+	)
+	push := func(us ...RefUpdate) Push { return Push{DefaultBranch: "main", Updates: us} }
+	tests := []struct {
+		name string
+		repo string
+		op   Push
+		want []string
+	}{
+		{name: "allowed", repo: "bolaum/ghgw", op: push(create("refs/heads/agent/x")),
+			want: []string{"allowed by grant 1 of group agents"}},
+		{name: "denied ref last", repo: "bolaum/ghgw", op: push(create("refs/heads/agent/x"), update("refs/heads/main"), create("refs/tags/v1")),
+			want: []string{another, guided, tag}},
+		{name: "denied ref first", repo: "bolaum/ghgw", op: push(update("refs/heads/main"), create("refs/heads/agent/x")),
+			want: []string{guided, another}},
+		{name: "denied as a whole", repo: "acme/secret", op: push(create("refs/heads/agent/x"), create("refs/heads/agent/y")),
+			want: []string{access + ". Repositories allowed: bolaum/*, nocred/app", access}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := p.Decide(Request{User: "rpi01-agent", Repo: mustRepo(t, tt.repo), Op: tt.op})
+			if got := d.RefReasons(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("RefReasons() = %q, want %q", got, tt.want)
 			}
 		})
 	}
