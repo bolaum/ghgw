@@ -1169,7 +1169,7 @@ func TestDecidePushGuidanceIsBounded(t *testing.T) {
 			t.Fatalf("ref %+v, want denied with the short reason", rd)
 		}
 	}
-	if len(d.Reason) > 2*guidanceBudget || !strings.HasSuffix(d.Reason, " and 999 more") {
+	if len(d.Reason) > 2*renderBudget || !strings.HasSuffix(d.Reason, " and 999 more") {
 		t.Errorf("reason is %d bytes, want the guidance cut to its budget:\n%.200s...", len(d.Reason), d.Reason)
 	}
 	if len(out) > 100*MaxRefUpdates {
@@ -1240,6 +1240,89 @@ func TestOversizedIdentifiers(t *testing.T) {
 	check(t, "unknown operation", d.Reason)
 	d = p.Decide(Request{User: huge, Repo: mustRepo(t, "bolaum/ghgw"), Op: Fetch{}})
 	check(t, "unknown user", d.Reason)
+
+	// Valid identifiers can be long too: they are rendered like any other.
+	name := strings.Repeat("a", 4<<20)
+	path := "/repos/{owner}/{repo}/pulls/" + name
+	table, err := NewRESTTable([]RESTOperation{
+		{Name: name, Method: "GET", Path: "/repos/{owner}/{repo}/pulls", Class: ClassRead},
+		{Name: name, Method: "GET", Path: "/repos/{owner}/{repo}/issues", Class: ClassRead},
+		{Name: "a.one", Method: "GET", Path: path, Class: ClassRead},
+		{Name: "a.two", Method: "GET", Path: path, Class: ClassRead},
+	})
+	check(t, "NewRESTTable duplicates", errMsg(err))
+	if table != nil || err == nil || !strings.Contains(err.Error(), "is defined twice") || !strings.Contains(err.Error(), "operations a.one and a.two both use") {
+		t.Errorf("NewRESTTable() table = %t, error = %.200v; want no table and both duplicates", table != nil, err)
+	}
+	table, err = NewRESTTable([]RESTOperation{{Name: name, Method: "GET", Path: path, Class: ClassRead}})
+	if err != nil {
+		t.Fatalf("NewRESTTable() error = %.200v", err)
+	}
+	p, err = NewPolicy(State{
+		Users:  []User{{Name: "a"}},
+		Grants: []Grant{grant(t, 1, "user a", []string{"o/*"}, AccessRead, nil, PresetNone)},
+		Owners: []string{"o"},
+	}, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = p.Decide(Request{User: "a", Repo: mustRepo(t, "o/x"), Op: REST{Name: name}})
+	check(t, "known operation without a preset", d.Reason)
+	if d.Allowed || !strings.HasSuffix(d.Reason, " on o/x needs API preset read; a has: none (grant 1 of user a)") {
+		t.Errorf("Decide() = %v %.200q, want a preset denial", d.Allowed, d.Reason)
+	}
+}
+
+// checkRendered checks that out is within budget and, when quoted, a valid Go string literal
+// (possibly cut, then followed by the length) whose value starts s.
+func checkRendered(t *testing.T, s, out string, budget int) {
+	t.Helper()
+	if len(out) > budget || !utf8.ValidString(out) || strings.ContainsFunc(out, func(c rune) bool { return !unicode.IsPrint(c) }) {
+		t.Fatalf("rendered %d bytes, want at most %d printable: %.200q", len(out), budget, out)
+	}
+	if out == s {
+		return
+	}
+	quoted := out
+	if i := strings.LastIndex(out, `"... (`); i >= 0 {
+		quoted = out[:i+1]
+		if want := fmt.Sprintf(`"... (%d bytes)`, len(s)); out[i:] != want {
+			t.Errorf("suffix %q, want %q", out[i:], want)
+		}
+	}
+	v, err := strconv.Unquote(quoted)
+	if err != nil || !strings.HasPrefix(s, v) || quoted == out && v != s {
+		t.Errorf("rendered %.200q, want a quoted prefix of the input (%v)", out, err)
+	}
+}
+
+func TestRender(t *testing.T) {
+	for _, tt := range []struct {
+		name, s, want string
+	}{
+		{"plain", "agent/x", "agent/x"},
+		{"empty", "", `""`},
+		{"control", "a\nb", `"a\nb"`},
+		{"bidi override", "a\u202eb", `"a\u202eb"`},
+		{"invalid UTF-8", "a\xffb", `"a\xffb"`},
+		{"long plain", strings.Repeat("a", 2000), `"` + strings.Repeat("a", 1006) + `"... (2000 bytes)`},
+		{"long escapes", strings.Repeat("\u202e", 300), `"` + strings.Repeat(`\u202e`, 167) + `"... (900 bytes)`},
+		{"quoting makes it too long", strings.Repeat("a", 1023) + "\n", `"` + strings.Repeat("a", 1006) + `"... (1024 bytes)`},
+		{"escapes are not split", strings.Repeat("a", 1004) + "\x00" + strings.Repeat("a", 20), `"` + strings.Repeat("a", 1004) + `"... (1025 bytes)`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := printable(tt.s)
+			if got != tt.want {
+				t.Errorf("printable() = %.200q, want %.200q", got, tt.want)
+			}
+			checkRendered(t, tt.s, got, renderBudget)
+		})
+	}
+	// Every budget from the smallest allowed one, with escapes of every width at the cut.
+	s := strings.Repeat("a\u202e\x00\xff\"b", 100)
+	for budget := 40; budget <= len(strconv.QuoteToASCII(s))+1; budget++ {
+		checkRendered(t, s, render(s, budget), budget)
+	}
 }
 
 func TestBoundedList(t *testing.T) {
@@ -1254,12 +1337,38 @@ func TestBoundedList(t *testing.T) {
 		{"cut", []string{long, long, long, long}, long + ", " + long + " and 2 more"},
 		{"first item always shown", []string{strings.Repeat("b", 1000), long}, strings.Repeat("b", 1000) + " and 1 more"},
 		{"items are rendered", []string{"a\nb"}, `"a\nb"`},
+		{"long first item leaves room for the suffix", []string{strings.Repeat("a", 1024), strings.Repeat("b", 20)},
+			`"` + strings.Repeat("a", 995) + `"... (1024 bytes) and 1 more`},
+		{"long first item and a short one", []string{strings.Repeat("a", 1024), "b"},
+			`"` + strings.Repeat("a", 995) + `"... (1024 bytes), b`},
+		{"long first item alone", []string{strings.Repeat("a", 1024)}, strings.Repeat("a", 1024)},
+		{"escaped first item", []string{strings.Repeat("\u202e", 300), "b", "c"},
+			`"` + strings.Repeat(`\u202e`, 166) + `"... (900 bytes) and 2 more`},
+		{"suffix room for the next item", []string{strings.Repeat("a", 1000), strings.Repeat("b", 12), "c"},
+			strings.Repeat("a", 1000) + " and 2 more"},
+		{"last item needs no suffix room", []string{strings.Repeat("a", 1000), strings.Repeat("b", 22)},
+			strings.Repeat("a", 1000) + ", " + strings.Repeat("b", 22)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := boundedList(tt.items); got != tt.want {
+			got := boundedList(tt.items)
+			if got != tt.want {
 				t.Errorf("boundedList() = %q, want %q", got, tt.want)
 			}
+			if len(got) > renderBudget {
+				t.Errorf("boundedList() is %d bytes, want at most %d", len(got), renderBudget)
+			}
 		})
+	}
+
+	// Many items of every size: the list stays within budget and counts what it leaves out.
+	var items []string
+	for i := range 3000 {
+		items = append(items, strings.Repeat("\u202e", i%400))
+	}
+	got := boundedList(items)
+	shown := strings.Count(got, ", ") + 1
+	if len(got) > renderBudget || !strings.HasSuffix(got, fmt.Sprintf(" and %d more", len(items)-shown)) {
+		t.Errorf("boundedList() of %d bytes shows %d items: %.200q...", len(got), shown, got)
 	}
 }

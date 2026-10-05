@@ -247,12 +247,12 @@ func NewRESTTable(ops []RESTOperation) (*RESTTable, error) {
 			continue
 		}
 		if _, dup := t.byName[op.Name]; dup {
-			errs = append(errs, fmt.Errorf("operation %s is defined twice", op.Name))
+			errs = append(errs, fmt.Errorf("operation %s is defined twice", printable(op.Name)))
 			continue
 		}
 		route := op.Method + " " + op.Path
 		if other, dup := routes[route]; dup {
-			errs = append(errs, fmt.Errorf("operations %s and %s both use %s", other, op.Name, route))
+			errs = append(errs, fmt.Errorf("operations %s and %s both use %s", printable(other), printable(op.Name), printable(route)))
 			continue
 		}
 		routes[route] = op.Name
@@ -278,7 +278,7 @@ func checkOperation(op RESTOperation) error {
 		return fmt.Errorf("operation %s: unknown class %d", name, op.Class)
 	}
 	if (op.Class == ClassRead || op.Class == ClassGlobal) && op.Method != "GET" {
-		return fmt.Errorf("operation %s: only GET operations can be read or global, not %s", name, op.Method)
+		return fmt.Errorf("operation %s: only GET operations can be read or global, not %s", name, printable(op.Method))
 	}
 	inRepo := op.Path == repoPathPrefix || strings.HasPrefix(op.Path, repoPathPrefix+"/")
 	switch {
@@ -298,7 +298,7 @@ func checkOperation(op RESTOperation) error {
 		for i, c := range hard {
 			names[i] = c.String()
 		}
-		return fmt.Errorf("operation %s: %s %s can reach a hard rule; its class must be %s", name, op.Method, printable(op.Path), strings.Join(names, " or "))
+		return fmt.Errorf("operation %s: %s %s can reach a hard rule; its class must be %s", name, printable(op.Method), printable(op.Path), strings.Join(names, " or "))
 	}
 	return nil
 }

@@ -150,7 +150,7 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 			continue
 		}
 		if _, dup := p.users[u.Name]; dup {
-			errs = append(errs, fmt.Errorf("user %s is defined twice", u.Name))
+			errs = append(errs, fmt.Errorf("user %s is defined twice", printable(u.Name)))
 			continue
 		}
 		p.users[u.Name] = u
@@ -163,16 +163,16 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 			continue
 		}
 		if _, dup := members[g.Name]; dup {
-			errs = append(errs, fmt.Errorf("group %s is defined twice", g.Name))
+			errs = append(errs, fmt.Errorf("group %s is defined twice", printable(g.Name)))
 			continue
 		}
 		members[g.Name] = []string{}
 		for _, m := range g.Members {
 			switch _, ok := p.users[m]; {
 			case !ok:
-				errs = append(errs, fmt.Errorf("group %s: member %s is not a user; create the user first", g.Name, printable(m)))
+				errs = append(errs, fmt.Errorf("group %s: member %s is not a user; create the user first", printable(g.Name), printable(m)))
 			case slices.Contains(members[g.Name], m):
-				errs = append(errs, fmt.Errorf("group %s: member %s is listed twice", g.Name, printable(m)))
+				errs = append(errs, fmt.Errorf("group %s: member %s is listed twice", printable(g.Name), printable(m)))
 			default:
 				members[g.Name] = append(members[g.Name], m)
 			}
@@ -210,7 +210,7 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 		}
 		key := strings.ToLower(o)
 		if p.owners[key] {
-			errs = append(errs, fmt.Errorf("owner %s is defined twice", o))
+			errs = append(errs, fmt.Errorf("owner %s is defined twice", printable(o)))
 			continue
 		}
 		p.owners[key] = true

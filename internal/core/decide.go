@@ -11,7 +11,7 @@ import (
 type Decision struct {
 	Allowed bool
 	// Reason says which grant allowed the request, or what was denied, why, and what would work.
-	// The guidance (allowed repositories or branches) appears here once, within guidanceBudget.
+	// The guidance (allowed repositories or branches) appears here once, within renderBudget.
 	Reason string
 	// Grant is the grant that allowed the request. It is zero on denial, for operations allowed
 	// for every user, and for pushes allowed by more than one grant (Refs then says which grant
@@ -58,7 +58,7 @@ func (p *Policy) Decide(r Request) Decision {
 	case !ok:
 		return deny(r, denialf("unknown user %s; ask the admin to create it", printable(r.User)))
 	case u.Disabled:
-		return deny(r, denialf("user %s is disabled; ask the admin to enable it", r.User))
+		return deny(r, denialf("user %s is disabled; ask the admin to enable it", printable(r.User)))
 	}
 	grants := p.grants[r.User]
 	var d Decision
@@ -75,7 +75,7 @@ func (p *Policy) Decide(r Request) Decision {
 		return deny(r, denialf("unknown operation"))
 	}
 	if d.Allowed && !r.Repo.IsZero() && !p.owners[strings.ToLower(r.Repo.Owner())] {
-		return deny(r, denialf("ghgw has no credential for owner %s; ask the admin to add one", r.Repo.Owner()))
+		return deny(r, denialf("ghgw has no credential for owner %s; ask the admin to add one", printable(r.Repo.Owner())))
 	}
 	return d
 }
@@ -109,7 +109,7 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 		return deny(r, denialf("the push has %d ref updates, more than the %d allowed; push fewer refs at a time", len(push.Updates), MaxRefUpdates))
 	}
 	if checkRefName("refs/heads/"+push.DefaultBranch) != nil {
-		return deny(r, denialf("the default branch of %s is unknown or invalid, so the push cannot be checked; try again", r.Repo))
+		return deny(r, denialf("the default branch of %s is unknown or invalid, so the push cannot be checked; try again", printable(r.Repo.String())))
 	}
 
 	d := Decision{Allowed: true, Refs: make([]RefDecision, 0, len(push.Updates))}
@@ -151,12 +151,13 @@ func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
 	}
 	// The class is recomputed so a misclassified entry still cannot allow a hard-rule operation.
 	class := op.class()
+	name := printable(op.Name)
 	switch class {
 	case ClassUnscoped:
-		return deny(r, denialf("%s is not allowed: %s", op.Name, hardRules[class]))
+		return deny(r, denialf("%s is not allowed: %s", name, hardRules[class]))
 	case ClassGlobal:
 		if !r.Repo.IsZero() {
-			return deny(r, denialf("%s is not repository-scoped; call it without a repository", op.Name))
+			return deny(r, denialf("%s is not repository-scoped; call it without a repository", name))
 		}
 		return Decision{Allowed: true, Reason: "allowed for every user"}
 	}
@@ -165,7 +166,7 @@ func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
 		return deny(r, why)
 	}
 	if rule, hard := hardRules[class]; hard {
-		return deny(r, denialf("%s is not allowed: %s", op.Name, rule))
+		return deny(r, denialf("%s is not allowed: %s", name, rule))
 	}
 	var have []string
 	for _, g := range matching {
@@ -175,8 +176,8 @@ func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
 		have = append(have, fmt.Sprintf("%s (%s)", g.API, g))
 	}
 	return deny(r, &denial{
-		reason:   fmt.Sprintf("%s on %s needs API preset %s", op.Name, r.Repo, presetFor(class)),
-		guidance: fmt.Sprintf("; %s has: %s", r.User, boundedList(have)),
+		reason:   fmt.Sprintf("%s on %s needs API preset %s", name, printable(r.Repo.String()), presetFor(class)),
+		guidance: fmt.Sprintf("; %s has: %s", printable(r.User), boundedList(have)),
 	})
 }
 
@@ -240,7 +241,7 @@ func matchRepo(r Request, grants []*Grant) ([]*Grant, *denial) {
 			}
 		}
 		return nil, &denial{
-			reason:   fmt.Sprintf("%s cannot access %s", r.User, r.Repo),
+			reason:   fmt.Sprintf("%s cannot access %s", printable(r.User), printable(r.Repo.String())),
 			guidance: ". Repositories allowed: " + boundedList(dedupe(repos)),
 		}
 	}
@@ -261,7 +262,7 @@ func writeGrants(r Request, grants []*Grant) ([]*Grant, *denial) {
 		}
 	}
 	if len(write) == 0 {
-		return nil, denialf("%s has read-only access to %s; pushing needs a grant with access write", r.User, r.Repo)
+		return nil, denialf("%s has read-only access to %s; pushing needs a grant with access write", printable(r.User), printable(r.Repo.String()))
 	}
 	return write, nil
 }
