@@ -35,17 +35,21 @@ func TestVersionCmd(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var out bytes.Buffer
+			var stdout, stderr bytes.Buffer
 			cmd := newRootCmd()
-			cmd.SetOut(&out)
-			cmd.SetErr(&out)
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
 			cmd.SetArgs(tt.args)
 			err := cmd.Execute()
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Execute() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if !tt.wantErr && out.String() != tt.want {
-				t.Errorf("output = %q, want %q", out.String(), tt.want)
+			// On error main prints the message once; the command itself prints nothing.
+			if stdout.String() != tt.want {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.want)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing", stderr.String())
 			}
 		})
 	}
