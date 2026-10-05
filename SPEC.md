@@ -148,10 +148,12 @@ key.
   log names the kind of failure, never the text of a transport error, which can quote GitHub's
   bytes.
 - Limits: a fetch negotiation body is at most 64 MiB (413, before anything reaches GitHub when the
-  length is announced); a forwarded request, reading its body and writing the answer included, has
-  at most 30 minutes, and a request that is not forwarded (denied, unauthenticated, malformed) 30 s;
-  GitHub gets 10 s to connect, 10 s for the TLS handshake and 2 minutes to send its response
-  headers. Over HTTP/1.1 a client has 10 s to send its request headers; request headers are at most
+  length is announced), and the command list of a push 4 MiB; the pack of a push is bounded only by
+  time, and by GitHub. A forwarded request, reading its body and writing the answer included, has
+  at most 30 minutes, and a request that is not forwarded (denied, unauthenticated, malformed) 30 s,
+  reading the command list and looking up the default branch of a push included; GitHub gets 10 s
+  to connect, 10 s for the TLS handshake and 2 minutes to send its response headers, and 10 s for a
+  default branch lookup. Over HTTP/1.1 a client has 10 s to send its request headers; request headers are at most
   64 KiB.
 - Every answer ghgw writes itself is `text/plain`, `ghgw: ` and the reason, which git shows to the
   agent as `remote: ghgw: ...`.
@@ -170,24 +172,46 @@ command is not allowed:
 | Other refs (`refs/notes/...`, anything outside `refs/heads/`) | Never in v0 (hard rule). |
 | Invalid ref names (`git check-ref-format`) | Never. |
 
-If the default branch cannot be looked up or is not a valid branch name, the push is rejected: the
-hard rule cannot be checked. A push without ref update commands is rejected too, and so is a push
-with more than 1000 ref updates or with a ref name longer than 1024 bytes; transports enforce these
-limits while parsing, before holding the commands in memory. A push over 1000 updates is rejected as
+If the default branch cannot be looked up or is not a valid branch name (within the 1024 bytes of a
+ref), the push is rejected: the hard rule cannot be checked. The reason says what failed (the owner's credential refused, no such
+repository, a redirect, the rate limit, GitHub unavailable or too slow). A push without ref update
+commands authorizes nothing: it is rejected (the gateway answers it without forwarding it, below),
+and so is a push with more than 1000 ref updates or with a ref name longer than 1024 bytes;
+transports enforce these limits while parsing, before holding the commands in memory. A push over 1000 updates is rejected as
 a whole, without a result per ref, whatever else is wrong with it. Refs and other names from the
 request or from policy input go through one renderer before they are shown anywhere (reasons,
 errors, `ng` lines, `explain`): quoted when they contain anything but printable characters, and cut
 after a whole character or escape so that the rendered name, with the length that follows a cut
 name, is at most 1024 bytes.
 
-A rejected push is answered by ghgw itself with a receive-pack report (`ng <ref> <reason>`, in the
-sideband when negotiated) and nothing reaches GitHub. Pushes are all-or-nothing: if one ref is
-rejected, the others are reported as `ng ... (another ref was rejected)`. Each ref gets a short
-reason of its own; the guidance (allowed branches) is part of the push's reason, once, so the report
-stays small whatever the policy holds.
+The command list is read more strictly than git reads it, so that git finds the same commands in
+it: lowercase hex lengths, pkt-lines of at most 65520 bytes, no special packet but the final flush,
+`shallow <id>` lines only before the first command, capabilities (after a NUL) only on the first
+command, then `<old-id> <new-id> <ref>` with ids of 40 or 64 lowercase hex characters, not both
+zero; one trailing newline is dropped from each line, as git does. Anything else, a list cut short,
+a signed push (`push-cert`) and a body with a `Content-Encoding` (415; git never compresses a push)
+are rejected as a whole and never forwarded. An allowed push is forwarded as the bytes that were
+checked followed by the rest of the body as the client sends it (push options and the pack, which
+ghgw does not read). An empty command list, which git sends to probe the connection before a large
+push, is answered as receive-pack answers it, with an empty result, and not forwarded either.
+
+A rejected push is answered by ghgw itself with a receive-pack report (`unpack ok`, then
+`ng <ref> ghgw: <reason>` per ref, in the sideband when negotiated) and nothing reaches GitHub;
+git shows each line as `! [remote rejected] <ref> (ghgw: <reason>)`. Pushes are all-or-nothing: if
+one ref is rejected, the others are reported as `ng ... (another ref was rejected)`. Each ref gets a
+short reason of its own; the guidance (allowed branches) is part of the push's reason, once, on the
+line of the ref the push was rejected for, so the report stays small whatever the policy holds. A
+push rejected as a whole (a command list ghgw does not accept, over 1000 updates or with a ref name
+over 1024 bytes) has no result per ref: its report is `unpack ghgw: <reason>`, which git shows as
+`remote unpack failed: ghgw: <reason>`. A client that asked for no report (neither `report-status`
+nor `report-status-v2`) gets the reason as a 400 or 403 instead. Before it answers, ghgw reads the
+rest of the body, within the 30 s of a request that is not forwarded: a client still sending its
+pack would not read the answer otherwise.
 
 Force pushes to allowed branches are allowed in v0 (agents rebase their own branches). The default
-branch is looked up through the REST API and cached for a few minutes.
+branch is looked up through the REST API (`GET /repos/{owner}/{repo}` with the owner's credential,
+redirects not followed) and cached for 5 minutes per repository, case-insensitively; failures are
+not cached.
 
 ### 5.3 REST
 
@@ -392,7 +416,8 @@ making the request; for a push it also shows the decision on each ref.
 
 - One credential per owner. v0: fine-grained PAT; the admin should limit it to the repositories
   agents may use.
-- The PAT needs these repository permissions for git and the v0 presets: Metadata read, Contents
+- The PAT needs these repository permissions for git and the v0 presets: Metadata read (default
+  branch lookups too), Contents
   read and write (clone, push), Pull requests read and write, Issues read and write (comments on
   issues), Actions read and write (logs, re-running failed jobs), Commit statuses read. Leave out
   every other permission, above all "Workflows" (so pushes cannot change `.github/workflows/`) and
