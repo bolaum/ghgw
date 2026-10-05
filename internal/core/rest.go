@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 // Class says what allows a REST operation: a preset, every user, or nothing (a hard rule).
-// Each entry of the operation table has exactly one class, so a hard-rule operation cannot be put
-// in a preset by mistake.
+// Each entry of the operation table has exactly one class. The hard rules do not depend on it:
+// hardRuleClass recognizes their method and path families on its own, NewRESTTable rejects entries
+// classified otherwise, and Decide denies them whatever the class says.
 type Class int
 
 const (
@@ -32,6 +34,23 @@ const (
 	// ClassUnscoped: endpoints that are not repository-scoped (/user, /orgs, /search, ...).
 	ClassUnscoped
 )
+
+var classNames = map[Class]string{
+	ClassRead:       "read",
+	ClassPR:         "pr",
+	ClassGlobal:     "global",
+	ClassCodeChange: "code change",
+	ClassMerge:      "merge",
+	ClassAdmin:      "admin",
+	ClassUnscoped:   "unscoped",
+}
+
+func (c Class) String() string {
+	if name, ok := classNames[c]; ok {
+		return name
+	}
+	return fmt.Sprintf("class %d", int(c))
+}
 
 // hardRules gives the reason of each hard-rule class: why, then what to do instead.
 var hardRules = map[Class]string{
@@ -76,6 +95,71 @@ type RESTOperation struct {
 	Class Class
 }
 
+const repoPathPrefix = "/repos/{owner}/{repo}"
+
+// globalRoutes are the only operations outside a repository that are allowed (SPEC.md 5.3).
+var globalRoutes = []string{"GET /rate_limit", "GET /meta"}
+
+var (
+	// adminSubtrees are repository subtrees that are administration for every method, reads
+	// included.
+	adminSubtrees = []string{"collaborators", "invitations", "hooks", "keys", "environments", "rulesets"}
+	// adminSegments are administration wherever they appear in a repository path
+	// (actions/secrets, dependabot/secrets, environments/{name}/variables, ...).
+	adminSegments = []string{"secrets", "variables", "organization-secrets", "organization-variables"}
+)
+
+// hardRuleClass returns the hard rule whose method and path family covers an operation, if any.
+// It is a backstop that does not trust the table's classification; the table itself remains the
+// allow-list, and anything it does not list is denied. The families, on path templates:
+//
+//   - unscoped: every path outside /repos/{owner}/{repo}, except GET /rate_limit and GET /meta;
+//   - code change: writes (any method but GET) under contents/ and git/, and writes to merges,
+//     merge-upstream and pulls/{n}/update-branch, which change branches without a push;
+//   - merge: writes to pulls/{n}/merge;
+//   - admin: writes to the repository itself (settings, deletion); every method under
+//     collaborators, invitations, hooks, keys, environments and rulesets, on any secrets or
+//     variables segment, and on branch protection; writes to branches/{branch}/rename.
+func hardRuleClass(method, path string) (Class, bool) {
+	rest, inRepo := strings.CutPrefix(path, repoPathPrefix)
+	if !inRepo || rest != "" && !strings.HasPrefix(rest, "/") {
+		if slices.Contains(globalRoutes, method+" "+path) {
+			return 0, false
+		}
+		return ClassUnscoped, true
+	}
+	write := method != "GET"
+	if rest == "" {
+		return ClassAdmin, write
+	}
+	segs := strings.Split(rest[1:], "/")
+	sub := segs[0]
+	switch {
+	case write && (sub == "contents" || sub == "git"):
+		return ClassCodeChange, true
+	case write && len(segs) == 1 && (sub == "merges" || sub == "merge-upstream"):
+		return ClassCodeChange, true
+	case write && len(segs) == 3 && sub == "pulls" && segs[2] == "update-branch":
+		return ClassCodeChange, true
+	case write && len(segs) == 3 && sub == "pulls" && segs[2] == "merge":
+		return ClassMerge, true
+	case slices.Contains(adminSubtrees, sub),
+		slices.ContainsFunc(segs, func(s string) bool { return slices.Contains(adminSegments, s) }),
+		sub == "branches" && slices.Contains(segs[1:], "protection"),
+		write && sub == "branches" && segs[len(segs)-1] == "rename":
+		return ClassAdmin, true
+	}
+	return 0, false
+}
+
+// class returns the operation's class, overridden by the hard rule that covers it, if any.
+func (o RESTOperation) class() Class {
+	if hard, ok := hardRuleClass(o.Method, o.Path); ok {
+		return hard
+	}
+	return o.Class
+}
+
 func (o RESTOperation) repoScoped() bool {
 	return o.Class != ClassGlobal && o.Class != ClassUnscoped
 }
@@ -86,8 +170,6 @@ type RESTTable struct {
 }
 
 var operationNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)*$`)
-
-const repoPathPrefix = "/repos/{owner}/{repo}"
 
 // NewRESTTable validates ops and builds a table. The error lists every problem.
 func NewRESTTable(ops []RESTOperation) (*RESTTable, error) {
@@ -133,13 +215,21 @@ func checkOperation(op RESTOperation) error {
 		return fmt.Errorf("operation %s: only GET operations can be read or global, not %s", op.Name, op.Method)
 	}
 	inRepo := op.Path == repoPathPrefix || strings.HasPrefix(op.Path, repoPathPrefix+"/")
+	segs := strings.Split(strings.TrimPrefix(op.Path, "/"), "/")
 	switch {
 	case !strings.HasPrefix(op.Path, "/"):
 		return fmt.Errorf("operation %s: path %q must start with '/'", op.Name, op.Path)
+	case op.Path != "/" && slices.ContainsFunc(segs, func(s string) bool { return s == "" || s == "." || s == ".." }):
+		return fmt.Errorf("operation %s: path %q has an empty, '.' or '..' segment", op.Name, op.Path)
 	case op.repoScoped() && !inRepo:
 		return fmt.Errorf("operation %s: path %q must start with %s", op.Name, op.Path, repoPathPrefix)
 	case !op.repoScoped() && inRepo:
 		return fmt.Errorf("operation %s: path %q is repository-scoped; use a repository class", op.Name, op.Path)
+	case op.Class == ClassGlobal && !slices.Contains(globalRoutes, op.Method+" "+op.Path):
+		return fmt.Errorf("operation %s: only %s can be global", op.Name, strings.Join(globalRoutes, " and "))
+	}
+	if hard := op.class(); hard != op.Class {
+		return fmt.Errorf("operation %s: %s %s falls under a hard rule; its class must be %s", op.Name, op.Method, op.Path, hard)
 	}
 	return nil
 }

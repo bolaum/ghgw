@@ -52,6 +52,49 @@ func TestNewRESTTable(t *testing.T) {
 			},
 		},
 		{
+			name: "global is only rate_limit and meta",
+			ops: []RESTOperation{
+				{Name: "users.get", Method: "GET", Path: "/user", Class: ClassGlobal},
+				{Name: "orgs.members", Method: "GET", Path: "/orgs/{org}/members", Class: ClassGlobal},
+			},
+			wantErr: []string{
+				"operation users.get: only GET /rate_limit and GET /meta can be global",
+				"operation orgs.members: only GET /rate_limit and GET /meta can be global",
+			},
+		},
+		{
+			name: "hard-rule families cannot be classified otherwise",
+			ops: []RESTOperation{
+				{Name: "contents.update", Method: "PUT", Path: "/repos/{owner}/{repo}/contents/{path}", Class: ClassPR},
+				{Name: "pulls.merge", Method: "PUT", Path: "/repos/{owner}/{repo}/pulls/{pull_number}/merge", Class: ClassPR},
+				{Name: "hooks.list", Method: "GET", Path: "/repos/{owner}/{repo}/hooks", Class: ClassRead},
+				{Name: "repos.update", Method: "PATCH", Path: "/repos/{owner}/{repo}", Class: ClassPR},
+				{Name: "contents.delete", Method: "DELETE", Path: "/repos/{owner}/{repo}/contents/{path}", Class: ClassAdmin},
+			},
+			wantErr: []string{
+				"operation contents.update: PUT /repos/{owner}/{repo}/contents/{path} falls under a hard rule; its class must be code change",
+				"operation pulls.merge: PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge falls under a hard rule; its class must be merge",
+				"operation hooks.list: GET /repos/{owner}/{repo}/hooks falls under a hard rule; its class must be admin",
+				"operation repos.update: PATCH /repos/{owner}/{repo} falls under a hard rule; its class must be admin",
+				"operation contents.delete: DELETE /repos/{owner}/{repo}/contents/{path} falls under a hard rule; its class must be code change",
+			},
+		},
+		{
+			name: "malformed path templates",
+			ops: []RESTOperation{
+				{Name: "a.a", Method: "GET", Path: "/repos/{owner}/{repo}/", Class: ClassRead},
+				{Name: "a.b", Method: "GET", Path: "/repos/{owner}/{repo}//pulls", Class: ClassRead},
+				{Name: "a.c", Method: "GET", Path: "/repos/{owner}/{repo}/../x", Class: ClassRead},
+				{Name: "a.d", Method: "GET", Path: "/repos/{owner}/{repo}/./pulls", Class: ClassRead},
+			},
+			wantErr: []string{
+				`operation a.a: path "/repos/{owner}/{repo}/" has an empty, '.' or '..' segment`,
+				`operation a.b: path "/repos/{owner}/{repo}//pulls" has an empty, '.' or '..' segment`,
+				`operation a.c: path "/repos/{owner}/{repo}/../x" has an empty, '.' or '..' segment`,
+				`operation a.d: path "/repos/{owner}/{repo}/./pulls" has an empty, '.' or '..' segment`,
+			},
+		},
+		{
 			name: "duplicates",
 			ops: []RESTOperation{
 				valid[0],
@@ -88,6 +131,97 @@ func TestNewRESTTable(t *testing.T) {
 	var nilTable *RESTTable
 	if _, ok := nilTable.lookup("pulls.list"); ok {
 		t.Error("a nil table found an operation")
+	}
+}
+
+func TestHardRuleClass(t *testing.T) {
+	const repo = "/repos/{owner}/{repo}"
+	tests := []struct {
+		method, path string
+		want         Class // 0: no hard rule
+	}{
+		{"GET", "/rate_limit", 0},
+		{"GET", "/meta", 0},
+		{"POST", "/rate_limit", ClassUnscoped},
+		{"GET", "/rate_limit/x", ClassUnscoped},
+		{"GET", "/user", ClassUnscoped},
+		{"GET", "/orgs/{org}/repos", ClassUnscoped},
+		{"GET", "/search/code", ClassUnscoped},
+		{"GET", "/", ClassUnscoped},
+		{"GET", "/repos/{owner}/{repo}x", ClassUnscoped},
+		{"GET", "/repositories/{id}", ClassUnscoped},
+
+		{"GET", repo, 0},
+		{"PATCH", repo, ClassAdmin},
+		{"DELETE", repo, ClassAdmin},
+
+		{"GET", repo + "/contents/{path}", 0},
+		{"PUT", repo + "/contents/{path}", ClassCodeChange},
+		{"DELETE", repo + "/contents/{path}", ClassCodeChange},
+		{"GET", repo + "/git/refs/{ref}", 0},
+		{"POST", repo + "/git/refs", ClassCodeChange},
+		{"PATCH", repo + "/git/refs/{ref}", ClassCodeChange},
+		{"DELETE", repo + "/git/refs/{ref}", ClassCodeChange},
+		{"POST", repo + "/git/trees", ClassCodeChange},
+		{"POST", repo + "/git/commits", ClassCodeChange},
+		{"POST", repo + "/git/blobs", ClassCodeChange},
+		{"POST", repo + "/git/tags", ClassCodeChange},
+		{"POST", repo + "/merges", ClassCodeChange},
+		{"POST", repo + "/merge-upstream", ClassCodeChange},
+		{"PUT", repo + "/pulls/{pull_number}/update-branch", ClassCodeChange},
+
+		{"PUT", repo + "/pulls/{pull_number}/merge", ClassMerge},
+		{"GET", repo + "/pulls/{pull_number}/merge", 0},
+		{"GET", repo + "/pulls", 0},
+		{"POST", repo + "/pulls", 0},
+		{"PATCH", repo + "/pulls/{pull_number}", 0},
+		{"POST", repo + "/issues/{issue_number}/comments", 0},
+
+		{"GET", repo + "/collaborators", ClassAdmin},
+		{"PUT", repo + "/collaborators/{username}", ClassAdmin},
+		{"GET", repo + "/invitations", ClassAdmin},
+		{"GET", repo + "/hooks", ClassAdmin},
+		{"POST", repo + "/hooks", ClassAdmin},
+		{"GET", repo + "/keys", ClassAdmin},
+		{"POST", repo + "/keys", ClassAdmin},
+		{"GET", repo + "/environments", ClassAdmin},
+		{"PUT", repo + "/environments/{environment_name}", ClassAdmin},
+		{"GET", repo + "/rulesets", ClassAdmin},
+		{"GET", repo + "/actions/secrets", ClassAdmin},
+		{"PUT", repo + "/actions/secrets/{secret_name}", ClassAdmin},
+		{"GET", repo + "/actions/organization-secrets", ClassAdmin},
+		{"GET", repo + "/actions/variables", ClassAdmin},
+		{"GET", repo + "/actions/organization-variables", ClassAdmin},
+		{"GET", repo + "/dependabot/secrets", ClassAdmin},
+		{"GET", repo + "/codespaces/secrets", ClassAdmin},
+		{"PUT", repo + "/environments/{environment_name}/variables/{name}", ClassAdmin},
+		{"GET", repo + "/branches/{branch}/protection", ClassAdmin},
+		{"PUT", repo + "/branches/{branch}/protection", ClassAdmin},
+		{"POST", repo + "/branches/{branch}/protection/required_signatures", ClassAdmin},
+		{"POST", repo + "/branches/{branch}/rename", ClassAdmin},
+		{"GET", repo + "/branches", 0},
+		{"GET", repo + "/branches/{branch}", 0},
+
+		{"GET", repo + "/actions/runs", 0},
+		{"POST", repo + "/actions/jobs/{job_id}/rerun", 0},
+		{"GET", repo + "/releases", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			got, ok := hardRuleClass(tt.method, tt.path)
+			if ok != (tt.want != 0) || ok && got != tt.want {
+				t.Errorf("hardRuleClass() = %v, %v; want %v", got, ok, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassString(t *testing.T) {
+	if got := ClassCodeChange.String(); got != "code change" {
+		t.Errorf("ClassCodeChange.String() = %q", got)
+	}
+	if got := Class(42).String(); got != "class 42" {
+		t.Errorf("Class(42).String() = %q", got)
 	}
 }
 

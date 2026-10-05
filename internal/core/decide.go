@@ -121,9 +121,11 @@ func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
 	if !ok {
 		return deny(r, "unknown operation %q; ghgw only forwards the API operations it knows", call.Name)
 	}
-	switch op.Class {
+	// The class is recomputed so a misclassified entry still cannot allow a hard-rule operation.
+	class := op.class()
+	switch class {
 	case ClassUnscoped:
-		return deny(r, "%s is not allowed: %s", op.Name, hardRules[op.Class])
+		return deny(r, "%s is not allowed: %s", op.Name, hardRules[class])
 	case ClassGlobal:
 		if !r.Repo.IsZero() {
 			return deny(r, "%s is not repository-scoped; call it without a repository", op.Name)
@@ -134,18 +136,18 @@ func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
 	if why != "" {
 		return deny(r, "%s", why)
 	}
-	if rule, hard := hardRules[op.Class]; hard {
+	if rule, hard := hardRules[class]; hard {
 		return deny(r, "%s is not allowed: %s", op.Name, rule)
 	}
 	var have []string
 	for _, g := range matching {
-		if g.API.allows(op.Class) {
+		if g.API.allows(class) {
 			return allow(g)
 		}
 		have = append(have, fmt.Sprintf("%s (%s)", g.API, g))
 	}
 	return deny(r, "%s on %s needs API preset %s; %s has: %s",
-		op.Name, r.Repo, presetFor(op.Class), r.User, strings.Join(have, ", "))
+		op.Name, r.Repo, presetFor(class), r.User, strings.Join(have, ", "))
 }
 
 // decideRef applies the push rules of SPEC.md section 5.2 to one ref update. branches lists the
