@@ -12,8 +12,9 @@ type Decision struct {
 	Allowed bool
 	// Reason says which grant allowed the request, or what was denied, why, and what would work.
 	Reason string
-	// Grant is the grant that allowed the request. It is nil on denial and for pushes allowed by
-	// more than one grant (Refs then says which grant allowed each ref).
+	// Grant is the grant that allowed the request. It is nil on denial, for operations allowed for
+	// every user, and for pushes allowed by more than one grant (Refs then says which grant
+	// allowed each ref).
 	Grant *Grant
 	// Refs has one entry per ref update of a push, in order: the lines of the receive-pack report.
 	Refs []RefDecision
@@ -44,10 +45,12 @@ func (p *Policy) Decide(r Request) Decision {
 		d = decideFetch(r, grants)
 	case Push:
 		d = decidePush(r, op, grants)
+	case REST:
+		d = p.decideREST(r, op, grants)
 	default:
 		return deny(r, "unknown operation")
 	}
-	if d.Allowed && !p.owners[strings.ToLower(r.Repo.Owner())] {
+	if d.Allowed && !r.Repo.IsZero() && !p.owners[strings.ToLower(r.Repo.Owner())] {
 		return deny(r, "ghgw has no credential for owner %s; ask the admin to add one", r.Repo.Owner())
 	}
 	return d
@@ -111,6 +114,38 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 		d.Grant = d.Refs[0].Grant
 	}
 	return d
+}
+
+func (p *Policy) decideREST(r Request, call REST, grants []*Grant) Decision {
+	op, ok := p.rest.lookup(call.Name)
+	if !ok {
+		return deny(r, "unknown operation %q; ghgw only forwards the API operations it knows", call.Name)
+	}
+	switch op.Class {
+	case ClassUnscoped:
+		return deny(r, "%s is not allowed: %s", op.Name, hardRules[op.Class])
+	case ClassGlobal:
+		if !r.Repo.IsZero() {
+			return deny(r, "%s is not repository-scoped; call it without a repository", op.Name)
+		}
+		return Decision{Allowed: true, Reason: "allowed for every user"}
+	}
+	matching, why := matchRepo(r, grants)
+	if why != "" {
+		return deny(r, "%s", why)
+	}
+	if rule, hard := hardRules[op.Class]; hard {
+		return deny(r, "%s is not allowed: %s", op.Name, rule)
+	}
+	var have []string
+	for _, g := range matching {
+		if g.API.allows(op.Class) {
+			return allow(g)
+		}
+		have = append(have, fmt.Sprintf("%s (%s)", g.API, g))
+	}
+	return deny(r, "%s on %s needs API preset %s; %s has: %s",
+		op.Name, r.Repo, presetFor(op.Class), r.User, strings.Join(have, ", "))
 }
 
 // decideRef applies the push rules of SPEC.md section 5.2 to one ref update. branches lists the

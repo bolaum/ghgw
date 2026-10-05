@@ -32,11 +32,31 @@ func testPolicy(t *testing.T) *Policy {
 			grant(t, 7, "user nopush", bolaum, AccessWrite, nil, PresetRead),
 		},
 		Owners: []string{"Bolaum", "acme"},
-	})
+	}, testRESTTable(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// testRESTTable has one operation per class. It is not the real operation table.
+func testRESTTable(t *testing.T) *RESTTable {
+	t.Helper()
+	table, err := NewRESTTable([]RESTOperation{
+		{Name: "pulls.list", Method: "GET", Path: "/repos/{owner}/{repo}/pulls", Class: ClassRead},
+		{Name: "pulls.create", Method: "POST", Path: "/repos/{owner}/{repo}/pulls", Class: ClassPR},
+		{Name: "contents.update", Method: "PUT", Path: "/repos/{owner}/{repo}/contents/{path}", Class: ClassCodeChange},
+		{Name: "git.create-ref", Method: "POST", Path: "/repos/{owner}/{repo}/git/refs", Class: ClassCodeChange},
+		{Name: "pulls.merge", Method: "PUT", Path: "/repos/{owner}/{repo}/pulls/{pull_number}/merge", Class: ClassMerge},
+		{Name: "hooks.create", Method: "POST", Path: "/repos/{owner}/{repo}/hooks", Class: ClassAdmin},
+		{Name: "users.get", Method: "GET", Path: "/user", Class: ClassUnscoped},
+		{Name: "rate_limit.get", Method: "GET", Path: "/rate_limit", Class: ClassGlobal},
+		{Name: "meta.get", Method: "GET", Path: "/meta", Class: ClassGlobal},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return table
 }
 
 // result is a Decision reduced to comparable values, with grants as IDs (0 for none).
@@ -390,6 +410,131 @@ func TestDecidePush(t *testing.T) {
 			user: "rpi01-agent", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(agentX)}},
 			want: deniedPush("push needs a repository", deniedRef(agentX, "push needs a repository")),
 		},
+	})
+}
+
+func TestDecideREST(t *testing.T) {
+	const (
+		codeChange = "code changes go through git push only; push to an allowed branch instead"
+		everyUser  = "allowed for every user"
+	)
+	runDecideTests(t, testPolicy(t), []decideTest{
+		{
+			name: "read preset allows read operations",
+			user: "multi", repo: "bolaum/app", op: REST{Name: "pulls.list"},
+			want: allowedBy(5, "user multi"),
+		},
+		{
+			name: "pr preset allows read operations",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "pulls.list"},
+			want: allowedBy(1, "group agents"),
+		},
+		{
+			name: "pr preset allows pr operations",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "pulls.create"},
+			want: allowedBy(1, "group agents"),
+		},
+		{
+			name: "api preset does not depend on git access",
+			user: "reviewer", repo: "bolaum/ghgw", op: REST{Name: "pulls.create"},
+			want: allowedBy(3, "user reviewer"),
+		},
+		{
+			name: "read preset denies pr operations",
+			user: "rpi01-agent", repo: "nocred/app", op: REST{Name: "pulls.create"},
+			want: result{Reason: "pulls.create on nocred/app needs API preset pr; rpi01-agent has: read (grant 4 of user rpi01-agent)"},
+		},
+		{
+			name: "no preset denies read operations",
+			user: "multi", repo: "bolaum/other", op: REST{Name: "pulls.list"},
+			want: result{Reason: "pulls.list on bolaum/other needs API preset read; multi has: none (grant 6 of user multi)"},
+		},
+		{
+			name: "every matching grant is listed",
+			user: "multi", repo: "bolaum/app", op: REST{Name: "pulls.create"},
+			want: result{Reason: "pulls.create on bolaum/app needs API preset pr; multi has: read (grant 5 of user multi), none (grant 6 of user multi)"},
+		},
+		{
+			name: "contents writes are a hard rule",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "contents.update"},
+			want: result{Reason: "contents.update is not allowed: " + codeChange},
+		},
+		{
+			name: "git data writes are a hard rule",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "git.create-ref"},
+			want: result{Reason: "git.create-ref is not allowed: " + codeChange},
+		},
+		{
+			name: "merging is a hard rule",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "pulls.merge"},
+			want: result{Reason: "pulls.merge is not allowed: ghgw never merges pull requests; ask a person to merge"},
+		},
+		{
+			name: "repository administration is a hard rule",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "hooks.create"},
+			want: result{Reason: "hooks.create is not allowed: repository administration is not available through ghgw"},
+		},
+		{
+			name: "repository access is checked before the hard rules",
+			user: "rpi01-agent", repo: "acme/secret", op: REST{Name: "pulls.merge"},
+			want: result{Reason: "rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, nocred/app"},
+		},
+		{
+			name: "endpoints that are not repository-scoped are a hard rule",
+			user: "rpi01-agent", op: REST{Name: "users.get"},
+			want: result{Reason: "users.get is not allowed: only repository endpoints (repos/{owner}/{repo}/...), rate_limit and meta are available"},
+		},
+		{
+			name: "rate_limit is allowed for every user",
+			user: "rpi01-agent", op: REST{Name: "rate_limit.get"},
+			want: result{Allowed: true, Reason: everyUser},
+		},
+		{
+			name: "meta is allowed without any grant",
+			user: "lonely", op: REST{Name: "meta.get"},
+			want: result{Allowed: true, Reason: everyUser},
+		},
+		{
+			name: "global operations still need an enabled user",
+			user: "old-agent", op: REST{Name: "meta.get"},
+			want: result{Reason: "user old-agent is disabled; ask the admin to enable it"},
+		},
+		{
+			name: "global operation with a repository",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "rate_limit.get"},
+			want: result{Reason: "rate_limit.get is not repository-scoped; call it without a repository"},
+		},
+		{
+			name: "repository operation without a repository",
+			user: "rpi01-agent", op: REST{Name: "pulls.list"},
+			want: result{Reason: "pulls.list needs a repository"},
+		},
+		{
+			name: "unknown operation",
+			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "pulls.fly"},
+			want: result{Reason: `unknown operation "pulls.fly"; ghgw only forwards the API operations it knows`},
+		},
+		{
+			name: "owner without credential",
+			user: "rpi01-agent", repo: "nocred/app", op: REST{Name: "pulls.list"},
+			want: result{Reason: "ghgw has no credential for owner nocred; ask the admin to add one"},
+		},
+	})
+
+	t.Run("no table", func(t *testing.T) {
+		p, err := NewPolicy(State{
+			Users:  []User{{Name: "a"}},
+			Grants: []Grant{grant(t, 1, "user a", []string{"bolaum/*"}, AccessRead, nil, PresetPR)},
+			Owners: []string{"bolaum"},
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runDecideTests(t, p, []decideTest{{
+			name: "every operation is unknown",
+			user: "a", repo: "bolaum/ghgw", op: REST{Name: "pulls.list"},
+			want: result{Reason: `unknown operation "pulls.list"; ghgw only forwards the API operations it knows`},
+		}})
 	})
 }
 

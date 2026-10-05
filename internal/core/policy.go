@@ -118,11 +118,14 @@ type Policy struct {
 	grants map[string][]*Grant
 	// owners holds the lowercased names of the owners that have a credential.
 	owners map[string]bool
+	rest   *RESTTable
 }
 
-// NewPolicy validates s and builds a Policy from a copy of it. The error lists every problem.
-func NewPolicy(s State) (*Policy, error) {
+// NewPolicy validates s and builds a Policy from a copy of it that classifies REST calls with
+// rest (nil: no REST operation is known). The error lists every problem.
+func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 	p := &Policy{
+		rest:   rest,
 		users:  make(map[string]User, len(s.Users)),
 		grants: make(map[string][]*Grant, len(s.Users)),
 		owners: make(map[string]bool, len(s.Owners)),

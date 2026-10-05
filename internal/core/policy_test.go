@@ -168,7 +168,7 @@ func TestNewPolicyValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := NewPolicy(tt.state(t))
+			p, err := NewPolicy(tt.state(t), nil)
 			if len(tt.wantErr) == 0 {
 				if err != nil || p == nil {
 					t.Fatalf("NewPolicy() = %v, %v; want a policy", p, err)
@@ -185,7 +185,7 @@ func TestNewPolicyCopiesState(t *testing.T) {
 		Users:  []User{{Name: "a"}},
 		Grants: []Grant{grant(t, 1, "user a", []string{"bolaum/x"}, AccessRead, nil, PresetRead)},
 	}
-	p, err := NewPolicy(s)
+	p, err := NewPolicy(s, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ type Request struct {
 	Op   Operation
 }
 
-// Operation is what a request does: Fetch or Push.
+// Operation is what a request does: Fetch, Push or REST.
 type Operation interface {
 	// operation returns the name used in reasons.
 	operation() string
@@ -48,3 +48,11 @@ const (
 	UpdateRef
 	DeleteRef
 )
+
+// REST is a REST API call, classified as the operation of the policy's REST table called Name
+// ("pulls.create"). Unknown operations are denied.
+type REST struct {
+	Name string
+}
+
+func (o REST) operation() string { return o.Name }
