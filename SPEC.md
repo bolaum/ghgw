@@ -191,24 +191,45 @@ branch is looked up through the REST API and cached for a few minutes.
 
 ### 5.3 REST
 
-- `/api/v3/<path>` is forwarded to `https://api.github.com/<path>` with the owner's credential.
+- `/api/v3/<path>` is forwarded to `https://api.github.com/<path>` with the owner's credential
+  (`Authorization: Bearer`). Operations that are not repository-scoped (`GET /rate_limit`,
+  `GET /meta`) name no owner and are forwarded without a credential.
 - The owner and repository come from the path (`/repos/{owner}/{repo}/...`).
 - Each request is classified as an operation (method + path template, e.g. `pulls.create`).
-  Unknown operations are denied. Bodies and query strings are not read, with two exceptions,
-  checked before anything is forwarded: `pulls.create-review` is forwarded only when its JSON body
-  has `event: COMMENT`, so agents cannot approve or request changes, and `pulls.create` only when
-  its `head` is a branch of the same repository (no `owner:branch`, no `head_repo`), so a pull
-  request cannot show the changes of a repository the grant does not cover. For both, the request
-  has no query string, and the body is at most 1 MiB, valid UTF-8 and exactly one JSON object
-  whose top-level keys stay distinct once escapes are decoded and case is ignored; `pulls.create`
-  takes only the keys `title`, `body`, `head`, `base`, `draft`, `maintainer_can_modify` and
-  `issue`. The forwarded body is the bytes that were checked.
+  Unknown operations are denied; the denial lists the operations ghgw forwards under the same
+  resource (`pulls`, `issues`, ...), or all of them. A `GET` with a body is rejected. Bodies and
+  query strings are not read, with two exceptions, checked before anything is forwarded:
+  `pulls.create-review` is forwarded only when its JSON body has `event: COMMENT`, so agents cannot
+  approve or request changes, and `pulls.create` only when its `head` is a branch of the same
+  repository (no `owner:branch`, no `head_repo`), so a pull request cannot show the changes of a
+  repository the grant does not cover. For both, the request has no query string, and the body is
+  at most 1 MiB, valid UTF-8 and exactly one JSON object whose top-level keys stay distinct once
+  escapes are decoded and case is ignored; `pulls.create` takes only the keys `title`, `body`,
+  `head`, `base`, `draft`, `maintainer_can_modify` and `issue`. The forwarded body is the bytes
+  that were checked, with `Content-Type: application/json`.
 - `Link` headers (pagination) and `Location` headers are rewritten from `api.github.com` to the
-  gateway, so `gh` never sends the ghgw key to GitHub, and a redirect gets a decision of its own
-  when the agent follows it. Response bodies are not rewritten. The gateway follows no redirect
-  itself, except the job log download: it fetches the signed storage URL GitHub redirects to
-  (`https` only, one hop, without the owner's credential or the agent's headers) and streams the
-  log, so agents never get that URL.
+  gateway (the host the client reached), so `gh` never sends the ghgw key to GitHub, and a redirect
+  gets a decision of its own when the agent follows it. GitHub's pagination links name the
+  repository by ID (`/repositories/{id}/...`); in a link, that path becomes the request's
+  `/repos/{owner}/{repo}`. A `Location` keeps it: GitHub redirects there for a renamed or
+  transferred repository, and the request that follows is denied with a reason that says to use the
+  new name. Links to other hosts are dropped, and a redirect to another host is a 502. Response
+  bodies are not rewritten. The gateway follows no redirect itself, except the job log download:
+  it fetches the signed storage URL GitHub redirects to (`https` only, one hop, without the owner's
+  credential or the agent's headers) and streams the log, so agents never get that URL.
+- Only these headers pass: `Accept`, `Accept-Encoding`, `Content-Type`, `If-Modified-Since`,
+  `If-None-Match`, `User-Agent` and `X-GitHub-Api-Version` upstream; `Cache-Control`,
+  `Content-Encoding`, `Content-Length`, `Content-Type`, `ETag`, `Expires`, `Last-Modified`,
+  `Retry-After`, `Vary`, `X-GitHub-Media-Type`, `X-GitHub-Request-Id`, the `X-RateLimit-*`
+  headers, and the rewritten `Link` and `Location` back (from the log storage: `Content-Length`
+  and `Content-Type`). The upstream is `https` only and used without a proxy from the environment,
+  as for git.
+- GitHub's answers pass on as they are, errors included (403, 404, 422, ...), except a 401, which is
+  about the owner's credential: it is a 502 that names the owner, as for git. Every answer ghgw
+  writes itself is JSON, `{"message": "ghgw: ..."}`, which `gh` shows as `gh: ghgw: ... (HTTP 403)`.
+- Limits: a request body is at most 1 MiB (413), an answer at most 256 MiB (a larger one is a 502,
+  or cut when its length was not announced), and a forwarded request has at most 5 minutes; the
+  other limits are those of git (section 5.2).
 
 API presets:
 
@@ -247,17 +268,23 @@ reason). `read` and `global` entries must be `GET`, and only `GET /rate_limit` a
 be `global`.
 
 A request is matched against the table on its canonical path: the gateway decodes the path once,
-rejects a segment that is empty, `.` or `..`, or still contains `%`, `\` or a control character,
-and forwards the matched path with each segment escaped again, so GitHub sees the segments ghgw
-classified (`branches/agent%2Ffix` is forwarded as `branches/agent/fix`). A parameter that GitHub
-types as an integer (`{pull_number}`, `{comment_id}`, ...) matches ASCII digits only, so
+rejects a segment that is empty, `.` or `..`, or still contains `%`, `\`, a control character or
+invalid UTF-8, and a path over 8 KiB or 256 segments (400), and forwards the matched path with each
+segment escaped again, so GitHub sees the segments ghgw classified (`branches/agent%2Ffix` is
+forwarded as `branches/agent/fix`). Literals are matched as they are (`Pulls` is an unknown
+operation). A parameter that GitHub types as an integer (`{pull_number}`, `{issue_number}`,
+`{review_id}`, `{comment_id}`, `{run_id}`, `{job_id}`) matches ASCII digits only, so
 `pulls/comments` is not `pulls/{pull_number}`. Any other parameter matches one segment, except
 `{path}` in `contents/{path}` and `{branch}` in `branches/{branch}`, which match one or more (bare
 `contents` is `repos.get-content`). A parameter may span segments only when it ends a `read`
 template and every `GET` route GitHub has below it is in a hard-rule family, so a longer value
 cannot name an operation the table leaves out; `commits/{ref}` fails that test
 (`commits/{ref}/comments`), so commit refs are one segment and agents pass a SHA. When several
-templates match, a literal beats a parameter at the first position where they differ.
+templates match, the first position where they differ decides: a literal beats an integer
+parameter, which beats any other parameter, which beats one that spans segments; a template that
+ends with the request beats one whose spanning parameter would match nothing. Two templates that
+would match the same requests (the same method and segments, parameters of the same kind) are
+rejected.
 
 The table is the allow-list. The hard rules are also enforced on their own, from method and path
 families that do not depend on the table: an entry that falls in a family must have that family's
@@ -267,9 +294,12 @@ or whole-segment `{parameters}`; no escapes, dots, backslashes or delimiters), s
 dodged by spelling. Parameters cannot hide a family either: the segment after
 `/repos/{owner}/{repo}` is always literal, a parameter stands for any one segment (whatever it
 matches in a request), and a `read`, `pr` or `global` template is rejected when some value of its
-parameters reaches a family (`pulls/{n}/{action}` reaches the merge rule). The REST proxy (M7)
+parameters reaches a family (`pulls/{n}/{action}` reaches the merge rule). The REST proxy
 checks the families again on the concrete method and path of each request, before the table, which
 also covers the longer values of a parameter that spans segments (`branches/agent/x/protection`).
+On a concrete path the segments are compared in lowercase (`pulls/1/MERGE` is a merge), so a
+spelling GitHub might route the same way cannot dodge a family; a branch or file name that only
+looks like a family path is denied too.
 The families, on paths under `/repos/{owner}/{repo}` ("writes" means any method but `GET`):
 
 | Hard rule | Family |
@@ -289,8 +319,9 @@ anything the table does not list is denied.
 
 ### 5.4 GraphQL
 
-Not supported in v0. `POST /api/graphql` returns a GraphQL error response that `gh` prints, telling
-the agent to use the REST API through `gh api`, with an example (section 8). Most `gh pr` and
+Not supported in v0. `POST /api/graphql` (any method, with a valid ghgw key) returns a GraphQL error
+response, a 200 with `errors` as GitHub answers a query it rejects, that `gh` prints, telling the
+agent to use the REST API through `gh api`, with an example (section 8). Nothing is forwarded. Most `gh pr` and
 `gh issue` subcommands use GraphQL; agents use `gh api repos/...` instead. v0 supports only
 `gh api`: `gh run`, `gh release` and `gh workflow` use REST too, but need operations the v0 table
 does not have.
@@ -467,7 +498,7 @@ ghgw explain --user U [--repo O/R] --op OP [--default-branch B] [--ref R]...
 - The `owner` commands and `explain` create the state directory and the master key on a new host
   (section 12), but no admin token: there is no admin API in v0 to use it.
 - `explain` decides from the policy file and the owners in the store. `--op` is `fetch`, `push` or
-  a REST operation name (all unknown until the REST table of M7). `push` without `--ref` asks
+  a REST operation name of the table (section 5.3). `push` without `--ref` asks
   whether the user may push at all; with `--ref` it decides that push ref by ref, which needs
   `--default-branch`. A `--ref` is a branch name or a full ref (`refs/tags/v1`); a leading `:` makes
   it a delete, as in `git push`. The exit status is 0 whatever the decision.
@@ -655,5 +686,4 @@ pull request; "done" means the listed checks pass in CI.
 
 ## 18. Open questions
 
-- Which credential `GET /rate_limit` uses: the path names no owner (milestone M7).
 - Whether agents get a read-only view of their own access beyond `whoami`.
