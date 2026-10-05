@@ -68,6 +68,17 @@ func TestNewKey(t *testing.T) {
 	}
 }
 
+func TestHashUserKey(t *testing.T) {
+	key, hash := NewUserKey()
+	if got, ok := HashUserKey(key); !ok || !bytes.Equal(got, hash) {
+		t.Errorf("HashUserKey(NewUserKey()) = %v, want the same hash", ok)
+	}
+	admin, _ := newKey(adminTokenPrefix)
+	if _, ok := HashUserKey(admin); ok {
+		t.Error("HashUserKey() accepted an admin token")
+	}
+}
+
 func TestHashKeyRejectsMalformed(t *testing.T) {
 	body := strings.Repeat("0123456789abcdef", 4)
 	tests := []struct {
