@@ -207,10 +207,14 @@ func readToken(stdin io.Reader, path string) (store.Secret, error) {
 			return store.Secret{}, errors.New("no token: pipe it on stdin or pass --token-file")
 		}
 	}
-	// A little more than a token, for the line break: anything longer is rejected below.
-	data, err := io.ReadAll(io.LimitReader(r, store.MaxTokenLen+16))
+	// A token and some room for the line break; anything longer is rejected whole, not cut to fit.
+	const maxInput = store.MaxTokenLen + 16
+	data, err := io.ReadAll(io.LimitReader(r, maxInput+1))
 	if err != nil {
 		return store.Secret{}, fmt.Errorf("read the token from %s: %w", source, err)
+	}
+	if len(data) > maxInput {
+		return store.Secret{}, fmt.Errorf("the token from %s is malformed: it is longer than %d characters", source, store.MaxTokenLen)
 	}
 	token := store.NewSecret(strings.TrimSpace(string(data)))
 	if err := store.CheckToken(token); err != nil {
@@ -242,27 +246,34 @@ func checkToken(ctx context.Context, apiURL, owner string, token store.Secret) (
 		return "", fmt.Errorf("cannot check the token with GitHub: %w; check the network and try again", err)
 	}
 	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
+	// What the server sends may be crafted: the status is printed from its code, not its reason
+	// phrase, and its message without the token, so neither can show the token or terminal
+	// escapes.
+	status := strings.TrimSpace(fmt.Sprintf("%d %s", resp.StatusCode, http.StatusText(resp.StatusCode)))
+	switch {
+	case resp.StatusCode == http.StatusOK:
 		return resp.Header.Get("Github-Authentication-Token-Expiration"), nil
-	case http.StatusUnauthorized:
+	case resp.StatusCode == http.StatusUnauthorized:
 		return "", errors.New("GitHub rejected the token; check that it was copied whole and has not expired or been revoked")
-	case http.StatusNotFound:
+	case resp.StatusCode == http.StatusNotFound:
 		return "", fmt.Errorf("GitHub has no user or organization %s; check the owner name", owner)
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		return "", fmt.Errorf("GitHub answered %s to the token check, a redirect ghgw does not follow so that the token goes nowhere else; check --api-url", status)
 	}
 	var body struct {
 		Message string `json:"message"`
 	}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body)
 	if body.Message == "" {
-		return "", fmt.Errorf("GitHub answered %s to the token check; try again later", resp.Status)
+		return "", fmt.Errorf("GitHub answered %s to the token check; try again later", status)
 	}
-	return "", fmt.Errorf("GitHub answered %s to the token check (%s); fix that and try again", resp.Status, core.Printable(body.Message))
+	msg := strings.ReplaceAll(body.Message, token.Reveal(), "[redacted]")
+	return "", fmt.Errorf("GitHub answered %s to the token check (%s); fix that and try again", status, core.Printable(msg))
 }
 
 // parseExpiry parses the token expiry GitHub reports ("2026-11-01 12:00:00 UTC" or with an
 // offset, "+0200"). An expiry it cannot read is returned as zero with an error, since the token
-// itself is fine.
+// itself is fine; the error does not quote it, since the server may have put the token there.
 func parseExpiry(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil
@@ -272,7 +283,7 @@ func parseExpiry(s string) (time.Time, error) {
 			return t.UTC(), nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("GitHub reported a token expiry ghgw cannot read (%s); ghgw owner list will show none", core.Printable(s))
+	return time.Time{}, errors.New("GitHub reported a token expiry ghgw cannot read; ghgw owner list will show none")
 }
 
 // describeExpiry says when a credential expires, and warns when that is soon or past.

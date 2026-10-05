@@ -318,8 +318,13 @@ making the request; for a push it also shows the decision on each ref.
 - Added from stdin or a file (never as a command-line argument), verified with an API call:
   `GET /users/{owner}` with the token, so GitHub rejects a bad token (401) or an unknown owner (404)
   before anything is stored. The call cannot tell whether the token's resource owner is that owner.
+  Redirects are not followed, so the token goes only to the API URL. Errors show the answer's
+  status code with its standard text, never the server's reason phrase, and its message with the
+  token redacted; an expiry ghgw cannot read is not quoted. A server can put the token in any of
+  these.
 - A token is 1 to 1024 visible ASCII characters (no spaces or line breaks: it goes into an HTTP
-  header).
+  header). Surrounding whitespace is trimmed, but input longer than a token and a line break is
+  rejected rather than cut to fit.
 - Encrypted at rest with AES-256-GCM under a master key generated on first start (state directory,
   mode 0600) or given through `GHGW_MASTER_KEY`. The key is 32 random bytes in standard base64,
   the same in the file and in the variable. Each encryption has a random nonce, and the owner

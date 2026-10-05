@@ -7,8 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bolaum/ghgw/internal/store"
 )
 
 const (
@@ -96,7 +99,7 @@ func TestOwners(t *testing.T) {
 		{"unreachable", goodToken, []string{"add", "bolaum", "--api-url", "http://127.0.0.1:1"}, "cannot check the token with GitHub"},
 		{"no token", "", []string{"add", "bolaum", "--api-url", api}, "the token from stdin is malformed: the token must be 1 to 1024 characters long"},
 		{"token with a space", "github pat", []string{"add", "bolaum", "--api-url", api}, "without spaces or line breaks"},
-		{"token too long", strings.Repeat("a", 2000), []string{"add", "bolaum", "--api-url", api}, "1 to 1024 characters"},
+		{"token too long", strings.Repeat("a", 2000), []string{"add", "bolaum", "--api-url", api}, "the token from stdin is malformed: it is longer than 1024 characters"},
 		{"missing token file", "", []string{"add", "bolaum", "--token-file", "/nonexistent"}, "read the token: open /nonexistent"},
 		{"bad owner name", goodToken, []string{"add", "../x", "--api-url", api}, "owner ../x must be"},
 		{"token as argument", "", []string{"add", "bolaum", goodToken}, "accepts 1 arg(s)"},
@@ -118,6 +121,124 @@ func TestOwners(t *testing.T) {
 	}
 	if out, err := owner("", "list", "--json"); err != nil || out != "[]\n" {
 		t.Errorf("owner list --json after removing all = %q, %v", out, err)
+	}
+}
+
+// TestOwnerAddUntrustedAnswers checks that what the server at --api-url sends cannot show the
+// token or terminal escapes, and that a redirect takes the token nowhere.
+func TestOwnerAddUntrustedAnswers(t *testing.T) {
+	var redirected atomic.Int32
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
+	t.Cleanup(elsewhere.Close)
+	// raw answers with status line "HTTP/1.1 " + status, which net/http would not write.
+	raw := func(status string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			conn, buf, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.Close()
+			buf.WriteString("HTTP/1.1 " + status + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			buf.Flush()
+		}
+	}
+	redirect := func(code int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, elsewhere.URL+r.URL.Path, code)
+		}
+	}
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    string // in the error, or on stderr when the owner is added
+		added   bool
+	}{
+		{
+			name: "message with the token",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"message": "token ` + goodToken + ` is not allowed"}`))
+			},
+			want: "GitHub answered 403 Forbidden to the token check (token [redacted] is not allowed); fix that and try again",
+		},
+		{name: "reason phrase with the token", handler: raw("403 " + goodToken), want: "GitHub answered 403 Forbidden to the token check; try again later"},
+		{name: "reason phrase with terminal escapes", handler: raw("403 \x1b[2J\x1b[Hhidden denial"), want: "GitHub answered 403 Forbidden to the token check; try again later"},
+		{name: "unknown status", handler: raw("599 " + goodToken), want: "GitHub answered 599 to the token check; try again later"},
+		{
+			name: "expiry with the token",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Github-Authentication-Token-Expiration", goodToken)
+			},
+			want:  "ghgw: warning: GitHub reported a token expiry ghgw cannot read; ghgw owner list will show none",
+			added: true,
+		},
+		{name: "302 redirect", handler: redirect(http.StatusFound), want: "GitHub answered 302 Found to the token check, a redirect ghgw does not follow so that the token goes nowhere else; check --api-url"},
+		{name: "307 redirect", handler: redirect(http.StatusTemporaryRedirect), want: "GitHub answered 307 Temporary Redirect to the token check, a redirect"},
+		{name: "308 redirect", handler: redirect(http.StatusPermanentRedirect), want: "GitHub answered 308 Permanent Redirect to the token check, a redirect"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := testEnv(t)
+			srv := httptest.NewServer(tt.handler)
+			t.Cleanup(srv.Close)
+			out, stderr, err := run(t, goodToken, "owner", "--state-dir", dir, "add", "bolaum", "--api-url", srv.URL)
+			shown := out + stderr
+			if err != nil {
+				shown += err.Error()
+			}
+			if strings.Contains(shown, goodToken) {
+				t.Errorf("the output shows the token: %q", shown)
+			}
+			if strings.ContainsRune(shown, '\x1b') {
+				t.Errorf("the output has a terminal escape: %q", shown)
+			}
+			if tt.added {
+				if err != nil || !strings.Contains(stderr, tt.want) {
+					t.Errorf("owner add = %v, stderr %q; want success and stderr to contain %q", err, stderr, tt.want)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.want)
+			}
+			wantList := "[]\n"
+			if tt.added {
+				wantList = `[{"name":"bolaum","expires_at":null,`
+			}
+			if list := mustRun(t, "", "owner", "--state-dir", dir, "list", "--json"); !strings.HasPrefix(list, wantList) {
+				t.Errorf("owner list --json = %q, want it to start with %q", list, wantList)
+			}
+		})
+	}
+	if n := redirected.Load(); n != 0 {
+		t.Errorf("the redirect target got %d requests, want none", n)
+	}
+}
+
+func TestReadToken(t *testing.T) {
+	maxToken := strings.Repeat("a", store.MaxTokenLen)
+	tests := []struct {
+		name, in, want, wantErr string
+	}{
+		{name: "line break", in: goodToken + "\n", want: goodToken},
+		{name: "longest token", in: maxToken + "\r\n", want: maxToken},
+		{name: "longest token and spaces", in: maxToken + strings.Repeat(" ", 16), want: maxToken},
+		{name: "more after the spaces", in: maxToken + strings.Repeat(" ", 16) + "b", wantErr: "the token from stdin is malformed: it is longer than 1024 characters"},
+		{name: "one too many", in: maxToken + "a", wantErr: "the token from stdin is malformed: the token must be 1 to 1024 characters long"},
+		{name: "empty", in: "\n", wantErr: "the token from stdin is malformed: the token must be 1 to 1024 characters long"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readToken(strings.NewReader(tt.in), "")
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Errorf("readToken() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got.Reveal() != tt.want {
+				t.Errorf("readToken() = %d characters, %v; want %d characters", len(got.Reveal()), err, len(tt.want))
+			}
+		})
 	}
 }
 
