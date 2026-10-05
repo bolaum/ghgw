@@ -318,6 +318,9 @@ ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, acm
 
 ## 9. Admin
 
+v0 ships only the local admin commands of milestone M3; the admin API, the admin client and the
+full CLI below are v1 (section 17).
+
 ### 9.1 Admin API
 
 JSON over HTTPS on the admin listener, `/admin/v1/...`, authenticated with an admin token
@@ -443,36 +446,34 @@ logged with `slog` to stdout. Secrets are never logged.
 
 ## 16. v0 milestones
 
-Each milestone is one pull request, reviewed before the next starts. "Done" means the listed checks
-pass in CI.
+v0 is done when the coding agents that develop ghgw work through ghgw: no GitHub credential in
+their containers. Anything that use does not need waits for v1 (section 17). Each milestone is one
+pull request; "done" means the listed checks pass in CI.
 
 | # | Scope | Done when |
 |---|---|---|
-| M0 | Module, cobra root, `ghgw version`, Makefile, CI (gofmt, vet, staticcheck, tests) | CI is green on the PR |
-| M1 | `internal/core`: users, groups, grants, hard rules, `Decide`, explain; in memory | Table tests cover allow, deny and the reason for each rule in sections 5 and 6 |
-| M2 | `internal/store` (SQLite, migrations), owners with encrypted credentials, master key, first admin token | Store tests; credentials are unreadable in the database file |
-| M3 | Admin API + `pkg/adminclient` + CLI for users, groups, grants, owners, policy, explain | A script creates the policy of section 6 through the CLI and `explain` answers as expected, `--json` included |
+| M0 | Module, cobra root, `ghgw version`, Makefile, CI | Done |
+| M1 | `internal/core`: users, groups, grants, hard rules, `Decide`, explain | Done |
+| M2 | `internal/store` (SQLite, migrations), owners with sealed credentials, master key, keys and tokens | Store tests; credentials are unreadable in the database file |
+| M3 | Local admin, no admin API: the policy (users with key hashes, groups, grants) in a YAML file read by `ghgw serve`; `ghgw key new` (shows a key once, prints its hash for the file); `ghgw owner add\|list\|remove` on the local store (token from stdin or a file); `ghgw explain` against the file (`--default-branch` for pushes) | A script writes the policy of section 6, adds an owner, and `explain` answers as expected |
 | M4 | Gateway listener, authentication, git fetch/clone proxy | `git clone` through the gateway works against a fake upstream; unknown keys and repos get the section 8 messages |
 | M5 | Push checks and receive-pack reports | Push to an allowed branch passes; default branch, tags and other branches are rejected with clear `ng` lines; nothing reaches the upstream on rejection |
-| M6 | `docs/operations.md`: the REST operation table for `read` and `pr` (proposal only, no code) | Approved by the maintainer |
-| M7 | REST proxy: classification, presets, hard rules, `Link`/`Location` rewrite, GraphQL guidance | `gh api` creates a pull request against the fake upstream; denied operations return guidance |
-| M8 | Client side: `setup` (local and `--global`, `--undo`), `credential`, `doctor`, `whoami` | In a scratch repository, one `ghgw setup` makes `git push` and `gh api` go through the gateway |
-| M9 | Audit (store, retention, `ghgw audit --follow`), TLS files and `--self-signed`, goreleaser, container image | Release snapshot builds linux/amd64 and linux/arm64; audit shows the requests of the M8 test |
+| M6 | `docs/operations.md`: the REST operation table, only what an agent needs to work on pull requests through `gh api` | Approved by the maintainer |
+| M7 | REST proxy with that table: classification, hard rules, `Link`/`Location` rewrite, GraphQL guidance | `gh api` creates and comments on a pull request against the fake upstream; denied operations return guidance |
+| M8 | Client side, minimal: `ghgw setup --global` (git `insteadOf`, credential helper, the gh host), `ghgw credential`, `ghgw whoami` | In a scratch repository, one `ghgw setup` makes `git push` and `gh api` go through the gateway |
+| M9 | Running it: one request log line per request (`slog`, stdout), TLS from certificate and key files, an example systemd unit | The agents developing ghgw work through a deployed gateway with no PAT in their containers |
 
 ## 17. Roadmap
 
-- **v0**: git (fetch, clone, push with ref checks), REST with presets, GraphQL guidance, users,
-  groups, grants, owners with fine-grained PATs, admin API and CLI, `setup`/`doctor`, audit.
-- **v1**: GraphQL (operation allowlist, node ID → owner mapping), `no_force` on grants (ancestry
-  from the pack), GitHub App credentials, per-user rate limits.
+- **v0**: section 16.
+- **v1**: the admin API, `pkg/adminclient` and the full CLI of section 9; audit in the store with
+  retention and `ghgw audit`; presets beyond the v0 table (labels with per-grant allowlists,
+  reviewers, re-runs, `gh run`); `setup --undo` and `doctor`; `--self-signed`; GraphQL (operation
+  allowlist, node ID → owner mapping); `no_force` on grants (ancestry from the pack); GitHub App
+  credentials; per-user rate limits; goreleaser builds and a container image.
 - **Later**: MCP admin server, web UI, GitHub Enterprise upstreams, darwin builds.
 
 ## 18. Open questions
 
-- The exact REST operation table for the `read` and `pr` presets (milestone M6).
 - Which credential `GET /rate_limit` uses: the path names no owner (milestone M7).
-- How `ghgw explain` gets the default branch for a push: looked up like the gateway does, or given
-  as a flag (milestone M3).
-- Whether agents get a read-only view of their own access beyond `whoami` (e.g. `ghgw whoami` in
-  `doctor` output is enough?).
-- Several admins with their own tokens, or one admin token in v0.
+- Whether agents get a read-only view of their own access beyond `whoami`.
