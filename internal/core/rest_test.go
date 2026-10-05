@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -41,12 +42,12 @@ func TestNewRESTTable(t *testing.T) {
 				`operation "": the name must be lowercase dotted words`,
 				`operation a.b: unknown method "get"`,
 				"operation a.c: unknown class 0",
-				"operation a.d: unknown class 8",
+				"operation a.d: unknown class 11",
 				"operation a.e: only GET operations can be read or global, not POST",
 				"operation a.f: only GET operations can be read or global, not DELETE",
-				`operation a.g: path "repos/{owner}/{repo}/a" must start with '/'`,
+				`operation a.g: path "repos/{owner}/{repo}/a" must be '/'-separated segments`,
 				`operation a.h: path "/user/repos" must start with /repos/{owner}/{repo}`,
-				`operation a.i: path "/repos/{owner}/{repo}x" must start with /repos/{owner}/{repo}`,
+				`operation a.i: path "/repos/{owner}/{repo}x" must be '/'-separated segments`,
 				`operation a.j: path "/repos/{owner}/{repo}/a" is repository-scoped; use a repository class`,
 				`operation a.k: path "/repos/{owner}/{repo}" is repository-scoped; use a repository class`,
 			},
@@ -77,21 +78,6 @@ func TestNewRESTTable(t *testing.T) {
 				"operation hooks.list: GET /repos/{owner}/{repo}/hooks falls under a hard rule; its class must be admin",
 				"operation repos.update: PATCH /repos/{owner}/{repo} falls under a hard rule; its class must be admin",
 				"operation contents.delete: DELETE /repos/{owner}/{repo}/contents/{path} falls under a hard rule; its class must be code change",
-			},
-		},
-		{
-			name: "malformed path templates",
-			ops: []RESTOperation{
-				{Name: "a.a", Method: "GET", Path: "/repos/{owner}/{repo}/", Class: ClassRead},
-				{Name: "a.b", Method: "GET", Path: "/repos/{owner}/{repo}//pulls", Class: ClassRead},
-				{Name: "a.c", Method: "GET", Path: "/repos/{owner}/{repo}/../x", Class: ClassRead},
-				{Name: "a.d", Method: "GET", Path: "/repos/{owner}/{repo}/./pulls", Class: ClassRead},
-			},
-			wantErr: []string{
-				`operation a.a: path "/repos/{owner}/{repo}/" has an empty, '.' or '..' segment`,
-				`operation a.b: path "/repos/{owner}/{repo}//pulls" has an empty, '.' or '..' segment`,
-				`operation a.c: path "/repos/{owner}/{repo}/../x" has an empty, '.' or '..' segment`,
-				`operation a.d: path "/repos/{owner}/{repo}/./pulls" has an empty, '.' or '..' segment`,
 			},
 		},
 		{
@@ -131,6 +117,44 @@ func TestNewRESTTable(t *testing.T) {
 	var nilTable *RESTTable
 	if _, ok := nilTable.lookup("pulls.list"); ok {
 		t.Error("a nil table found an operation")
+	}
+}
+
+func TestNonCanonicalPathTemplates(t *testing.T) {
+	// Anything an upstream could decode or split differently would let a hard-rule path hide from
+	// the families, so only canonical templates are accepted.
+	for _, tt := range []struct{ name, path string }{
+		{"trailing slash", "/repos/{owner}/{repo}/"},
+		{"empty segment", "/repos/{owner}/{repo}//pulls"},
+		{"dot dot", "/repos/{owner}/{repo}/../x"},
+		{"dot", "/repos/{owner}/{repo}/./pulls"},
+		{"percent escape of contents", "/repos/{owner}/{repo}/%63ontents/{path}"},
+		{"percent escape of hooks", "/repos/{owner}/{repo}/%68ooks"},
+		{"escaped dot dot", "/repos/{owner}/{repo}/%2e%2e/x"},
+		{"double escape", "/repos/{owner}/{repo}/%2563ontents"},
+		{"backslash", "/repos/{owner}/{repo}/a\\b"},
+		{"NUL", "/repos/{owner}/{repo}/a\x00"},
+		{"newline", "/repos/{owner}/{repo}/a\nb"},
+		{"query", "/repos/{owner}/{repo}/pulls?state=all"},
+		{"fragment", "/repos/{owner}/{repo}/pulls#x"},
+		{"uppercase", "/repos/{owner}/{repo}/Pulls"},
+		{"semicolon", "/repos/{owner}/{repo}/a;b"},
+		{"unclosed brace", "/repos/{owner}/{repo}/{pull"},
+		{"stray brace", "/repos/{owner}/{repo}/pull}"},
+		{"empty parameter", "/repos/{owner}/{repo}/{}"},
+		{"parameter inside a segment", "/repos/{owner}/{repo}/x{n}"},
+		{"two parameters in a segment", "/repos/{owner}/{repo}/{a}{b}"},
+		{"uppercase parameter", "/repos/{owner}/{repo}/{A}"},
+		{"dotted parameter", "/repos/{owner}/{repo}/{a.b}"},
+		{"root", "/"},
+		{"empty", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewRESTTable([]RESTOperation{{Name: "a.b", Method: "GET", Path: tt.path, Class: ClassRead}})
+			if err == nil || !strings.Contains(err.Error(), "must be '/'-separated segments") {
+				t.Errorf("NewRESTTable(%q) error = %v, want a canonical template error", tt.path, err)
+			}
+		})
 	}
 }
 
@@ -202,9 +226,56 @@ func TestHardRuleClass(t *testing.T) {
 		{"GET", repo + "/branches", 0},
 		{"GET", repo + "/branches/{branch}", 0},
 
+		{"POST", repo + "/releases", ClassRelease},
+		{"PATCH", repo + "/releases/{release_id}", ClassRelease},
+		{"DELETE", repo + "/releases/assets/{asset_id}", ClassRelease},
+		{"POST", repo + "/releases/generate-notes", ClassRelease},
+		{"GET", repo + "/releases", 0},
+		{"GET", repo + "/releases/latest", 0},
+
+		{"POST", repo + "/statuses/{sha}", ClassCIResult},
+		{"POST", repo + "/check-runs", ClassCIResult},
+		{"PATCH", repo + "/check-runs/{check_run_id}", ClassCIResult},
+		{"POST", repo + "/check-suites", ClassCIResult},
+		{"POST", repo + "/check-suites/{check_suite_id}/rerequest", ClassCIResult},
+		{"GET", repo + "/check-runs/{check_run_id}", 0},
+		{"GET", repo + "/commits/{ref}/statuses", 0},
+		{"GET", repo + "/commits/{ref}/check-runs", 0},
+
+		{"POST", repo + "/dispatches", ClassTrigger},
+		{"POST", repo + "/actions/workflows/{workflow_id}/dispatches", ClassTrigger},
+		{"POST", repo + "/deployments", ClassTrigger},
+		{"POST", repo + "/deployments/{deployment_id}/statuses", ClassTrigger},
+		{"DELETE", repo + "/deployments/{deployment_id}", ClassTrigger},
+		{"GET", repo + "/deployments", 0},
+		{"GET", repo + "/actions/workflows/{workflow_id}", 0},
+
+		{"POST", repo + "/transfer", ClassAdmin},
+		{"POST", repo + "/forks", ClassAdmin},
+		{"GET", repo + "/forks", 0},
+		{"PUT", repo + "/topics", ClassAdmin},
+		{"GET", repo + "/topics", 0},
+		{"GET", repo + "/pages", ClassAdmin},
+		{"POST", repo + "/pages/builds", ClassAdmin},
+		{"GET", repo + "/autolinks", ClassAdmin},
+		{"GET", repo + "/vulnerability-alerts", ClassAdmin},
+		{"PUT", repo + "/automated-security-fixes", ClassAdmin},
+		{"PUT", repo + "/private-vulnerability-reporting", ClassAdmin},
+		{"PUT", repo + "/actions/permissions", ClassAdmin},
+		{"GET", repo + "/actions/permissions/workflow", ClassAdmin},
+		{"GET", repo + "/actions/runners", ClassAdmin},
+		{"POST", repo + "/actions/runners/registration-token", ClassAdmin},
+		{"GET", repo + "/actions/runner-groups", ClassAdmin},
+		{"PUT", repo + "/actions/oidc/customization/sub", ClassAdmin},
+		{"DELETE", repo + "/actions/caches", ClassAdmin},
+		{"DELETE", repo + "/actions/caches/{cache_id}", ClassAdmin},
+		{"GET", repo + "/actions/cache/usage", ClassAdmin},
+
+		// Re-runs stay in the pr preset (SPEC.md 5.3).
 		{"GET", repo + "/actions/runs", 0},
 		{"POST", repo + "/actions/jobs/{job_id}/rerun", 0},
-		{"GET", repo + "/releases", 0},
+		{"POST", repo + "/actions/runs/{run_id}/rerun", 0},
+		{"POST", repo + "/actions/runs/{run_id}/rerun-failed-jobs", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
