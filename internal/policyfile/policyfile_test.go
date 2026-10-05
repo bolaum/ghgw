@@ -2,6 +2,7 @@ package policyfile
 
 import (
 	"bytes"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,13 +47,7 @@ func TestParseSpecPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if got := FormatKeyHash(pf.KeyHashes["rpi01-agent"]); got != hashA {
-		t.Errorf("key hash of rpi01-agent = %s, want %s", got, hashA)
-	}
-	p, err := core.NewPolicy(core.State{
-		Users: pf.State.Users, Groups: pf.State.Groups, Grants: pf.State.Grants,
-		Owners: []string{"bolaum", "acme"},
-	}, nil)
+	p, err := pf.Policy([]string{"bolaum", "acme"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +71,42 @@ func TestParseSpecPolicy(t *testing.T) {
 		if got := p.Decide(core.Request{User: tt.user, Repo: repo, Op: tt.op}).String(); got != tt.want {
 			t.Errorf("Decide(%s, %s) = %q, want %q", tt.user, tt.repo, got, tt.want)
 		}
+	}
+}
+
+func TestUserByKeyHash(t *testing.T) {
+	pf, err := Parse([]byte(specPolicy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := func(s string) []byte {
+		b, err := hex.DecodeString(strings.TrimPrefix(s, keyHashPrefix))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	sameSelector := hash(hashA)
+	sameSelector[len(sameSelector)-1] ^= 1
+	tests := []struct {
+		name     string
+		hash     []byte
+		wantUser string
+	}{
+		{name: "first user", hash: hash(hashA), wantUser: "rpi01-agent"},
+		{name: "second user", hash: hash(hashB), wantUser: "devct01-agent"},
+		{name: "same selector, other hash", hash: sameSelector},
+		{name: "unknown", hash: make([]byte, 32)},
+		{name: "selector only", hash: hash(hashA)[:selectorBytes]},
+		{name: "empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			user, ok := pf.UserByKeyHash(tt.hash)
+			if user != tt.wantUser || ok != (tt.wantUser != "") {
+				t.Errorf("UserByKeyHash() = %q, %v, want %q", user, ok, tt.wantUser)
+			}
+		})
 	}
 }
 

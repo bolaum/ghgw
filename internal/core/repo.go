@@ -39,6 +39,9 @@ func ParseRepo(s string) (Repo, error) {
 	if hasGitSuffix(name) {
 		return Repo{}, fmt.Errorf("repository %s: write the name without the .git suffix", Printable(s))
 	}
+	if hasWikiSuffix(name) {
+		return Repo{}, fmt.Errorf("repository %s: names ending in .wiki are GitHub wikis, which ghgw does not serve", Printable(s))
+	}
 	return Repo{owner: owner, name: name}, nil
 }
 
@@ -46,6 +49,13 @@ func ParseRepo(s string) (Repo, error) {
 // transports treat the suffix as optional, so "x.git" must always mean repository "x".
 func hasGitSuffix(name string) bool {
 	return strings.HasSuffix(strings.ToLower(name), ".git")
+}
+
+// hasWikiSuffix reports whether a repository name ends in ".wiki". Such names are rejected: GitHub
+// serves the wiki of repository x as x.wiki, so a grant on "x.wiki" (or a pattern matching it)
+// would reach the wiki of a repository the grant does not name.
+func hasWikiSuffix(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), ".wiki")
 }
 
 // Owner returns the owner as given.

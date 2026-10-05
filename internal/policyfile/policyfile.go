@@ -6,6 +6,7 @@ package policyfile
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -30,8 +31,44 @@ const keyHashPrefix = "sha256:"
 type File struct {
 	// State holds the users, groups and grants. It has no owners: they come from the store.
 	State core.State
-	// KeyHashes maps each user to the SHA-256 hash of its ghgw key.
-	KeyHashes map[string][]byte
+	// keys indexes the users by the selector of their key hash (SPEC.md section 5.1).
+	keys map[selector][]userKey
+}
+
+// A key hash is looked up by its first bytes, the selector, and then compared in full in constant
+// time, so a lookup never compares a whole secret-derived value byte by byte.
+const selectorBytes = 8
+
+type selector [selectorBytes]byte
+
+type userKey struct {
+	user string
+	hash []byte
+}
+
+// UserByKeyHash returns the user whose ghgw key has the SHA-256 hash hash, or false when no user
+// has it.
+func (f *File) UserByKeyHash(hash []byte) (string, bool) {
+	if len(hash) != sha256.Size {
+		return "", false
+	}
+	user, found := "", false
+	// Every candidate is compared, so the time does not depend on which one matches.
+	for _, k := range f.keys[selector(hash[:selectorBytes])] {
+		if subtle.ConstantTimeCompare(hash, k.hash) == 1 {
+			user, found = k.user, true
+		}
+	}
+	return user, found
+}
+
+// Policy builds the policy that decides requests from the file and the owners that have a
+// credential. The REST operation table comes with the REST proxy (SPEC.md section 16, M7); until
+// then every REST operation is unknown, and denied.
+func (f *File) Policy(owners []string) (*core.Policy, error) {
+	st := f.State
+	st.Owners = owners
+	return core.NewPolicy(st, nil)
 }
 
 // The file's YAML. The type names appear in decoding errors ("field acess not found in type
@@ -110,7 +147,7 @@ func Parse(data []byte) (*File, error) {
 	}
 
 	var errs []error
-	pf := &File{KeyHashes: make(map[string][]byte, len(p.Users))}
+	pf := &File{keys: make(map[selector][]userKey, len(p.Users))}
 	// Groups are sorted, and so are users, so the state and the errors do not depend on map order.
 	members := make(map[string][]string, len(p.Groups))
 	for _, name := range slices.Sorted(maps.Keys(p.Groups)) {
@@ -128,7 +165,8 @@ func Parse(data []byte) (*File, error) {
 			errs = append(errs, fmt.Errorf("users %s and %s have the same key_hash; give each user its own key (ghgw key new)", core.Printable(other), core.Printable(name)))
 		default:
 			byHash[string(hash)] = name
-			pf.KeyHashes[name] = hash
+			sel := selector(hash[:selectorBytes])
+			pf.keys[sel] = append(pf.keys[sel], userKey{user: name, hash: hash})
 		}
 		for _, g := range u.Groups {
 			if _, ok := members[g]; !ok {

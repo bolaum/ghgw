@@ -58,17 +58,28 @@ func openStore(ctx context.Context, dir string) (*store.Store, error) {
 	return s, err
 }
 
+// policyPath returns path, or the default policy file when path is empty.
+func policyPath(path string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+	return defaultPath(policyEnv, "XDG_CONFIG_HOME", ".config", "ghgw/policy.yaml")
+}
+
+// policyErr adds what to do to an error about the policy file at path.
+func policyErr(path string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("policy file %s does not exist; write it (SPEC.md section 6) or point to it with --policy or $%s", path, policyEnv)
+	}
+	return err
+}
+
 // loadPolicy loads the policy file at path, or at the default path when path is empty.
 func loadPolicy(path string) (*policyfile.File, error) {
-	if path == "" {
-		var err error
-		if path, err = defaultPath(policyEnv, "XDG_CONFIG_HOME", ".config", "ghgw/policy.yaml"); err != nil {
-			return nil, err
-		}
+	path, err := policyPath(path)
+	if err != nil {
+		return nil, err
 	}
 	pf, err := policyfile.Load(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("policy file %s does not exist; write it (SPEC.md section 6) or point to it with --policy or $%s", path, policyEnv)
-	}
-	return pf, err
+	return pf, policyErr(path, err)
 }

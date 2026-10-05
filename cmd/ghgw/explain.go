@@ -54,13 +54,11 @@ func newExplainCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st := pf.State
-			for _, o := range owners {
-				st.Owners = append(st.Owners, o.Name)
+			names := make([]string, len(owners))
+			for i, o := range owners {
+				names[i] = o.Name
 			}
-			// The REST operation table comes with the REST proxy (SPEC.md section 16, M7); until
-			// then every REST operation is unknown, and denied.
-			p, err := core.NewPolicy(st, nil)
+			p, err := pf.Policy(names)
 			if err != nil {
 				return err
 			}

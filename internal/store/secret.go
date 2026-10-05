@@ -63,6 +63,10 @@ func newKey(prefix string) (Secret, []byte) {
 // NewUserKey returns a new ghgw key and its SHA-256 hash.
 func NewUserKey() (Secret, []byte) { return newKey(userKeyPrefix) }
 
+// HashUserKey returns the SHA-256 hash of a ghgw key, or false when key is not a well-formed ghgw
+// key (no such key can exist, so it is unknown without a lookup).
+func HashUserKey(key Secret) ([]byte, bool) { return hashKey(userKeyPrefix, key) }
+
 // hashKey returns the hash of key, or false when key is not a well-formed key with prefix: such a
 // key cannot exist, so it is unknown without a database lookup. The check also bounds the input.
 func hashKey(prefix string, key Secret) ([]byte, bool) {
