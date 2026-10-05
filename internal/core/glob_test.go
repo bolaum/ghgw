@@ -197,3 +197,34 @@ func TestBranchGlob(t *testing.T) {
 		t.Error("the zero BranchGlob matches, want no match")
 	}
 }
+
+// TestBranchGlobLength checks the length limit, which comes before the regexp is built: a longer
+// pattern of valid syntax is an error, not a panic, and its message stays small.
+func TestBranchGlobLength(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		glob string
+		ok   bool
+	}{
+		{"stars at the limit", strings.Repeat("a*", maxBranchGlobLen/2) + "a", true},
+		{"double stars at the limit", strings.Repeat("a/**/", maxBranchGlobLen/5) + strings.Repeat("a", maxBranchGlobLen%5), true},
+		{"one byte over", strings.Repeat("a*", maxBranchGlobLen/2) + "aa", false},
+		{"megabytes of stars", strings.Repeat("a*", 2<<20), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			g, err := ParseBranchGlob(tt.glob)
+			if tt.ok {
+				if err != nil || !g.Match(strings.ReplaceAll(tt.glob, "*", "")) {
+					t.Errorf("ParseBranchGlob() error = %v, want a pattern that matches", err)
+				}
+				return
+			}
+			if err == nil || g != (BranchGlob{}) {
+				t.Fatalf("ParseBranchGlob() = %v, %v; want the zero BranchGlob and an error", g, err)
+			}
+			if msg := err.Error(); len(msg) > 2*MaxRefNameLen || !strings.Contains(msg, "longer than the 1013 allowed") {
+				t.Errorf("error of %d bytes: %.200s", len(msg), msg)
+			}
+		})
+	}
+}

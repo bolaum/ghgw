@@ -46,7 +46,11 @@ func ParseRepoGlob(s string) (RepoGlob, error) {
 	if hasGitSuffix(name) {
 		return RepoGlob{}, fmt.Errorf("repository pattern %s: write the name without the .git suffix", printable(s))
 	}
-	return RepoGlob{text: s, owner: owner, name: compileGlob(name, "(?i)", ".*")}, nil
+	re, err := compileGlob(name, "(?i)", ".*")
+	if err != nil {
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: %w", printable(s), err)
+	}
+	return RepoGlob{text: s, owner: owner, name: re}, nil
 }
 
 // Match reports whether r matches the pattern.
@@ -69,16 +73,24 @@ func (g RepoGlob) String() string { return g.text }
 // a valid branch name: with each run of stars replaced by one letter, it must pass git
 // check-ref-format. "a.*.b" and "agent/**" pass; "*.lock" and ".*" never match a valid branch and
 // are rejected instead of silently allowing nothing. Requested refs are validated on their own.
+// A pattern is at most as long as a branch name can be (1013 bytes), which bounds its compiled form.
 // The zero BranchGlob matches nothing.
 type BranchGlob struct {
 	text string
 	re   *regexp.Regexp
 }
 
+// maxBranchGlobLen is the longest branch pattern: as long as a branch name can be, so that
+// "refs/heads/" and the pattern fit in MaxRefNameLen.
+const maxBranchGlobLen = MaxRefNameLen - len("refs/heads/")
+
 // ParseBranchGlob parses a branch pattern.
 func ParseBranchGlob(s string) (BranchGlob, error) {
 	if s == "" {
 		return BranchGlob{}, errors.New("branch pattern is empty")
+	}
+	if len(s) > maxBranchGlobLen {
+		return BranchGlob{}, fmt.Errorf("branch pattern %s is %d bytes, longer than the %d allowed", printable(s), len(s), maxBranchGlobLen)
 	}
 	if strings.HasPrefix(s, "refs/") {
 		return BranchGlob{}, fmt.Errorf("branch pattern %s: write the branch name without refs/heads/", printable(s))
@@ -92,7 +104,11 @@ func ParseBranchGlob(s string) (BranchGlob, error) {
 	if err := checkRefName("refs/heads/" + starsRE.ReplaceAllString(s, "x")); err != nil {
 		return BranchGlob{}, fmt.Errorf("branch pattern %s: %w", printable(s), err)
 	}
-	return BranchGlob{text: s, re: compileGlob(s, "", "[^/]*")}, nil
+	re, err := compileGlob(s, "", "[^/]*")
+	if err != nil {
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: %w", printable(s), err)
+	}
+	return BranchGlob{text: s, re: re}, nil
 }
 
 // Match reports whether branch (without "refs/heads/") matches the pattern.
@@ -105,8 +121,10 @@ func (g BranchGlob) String() string { return g.text }
 var starsRE = regexp.MustCompile(`\*+`)
 
 // compileGlob turns a glob into an anchored regexp: "**" matches anything, '*' matches star.
-// RE2 matches in linear time, so no pattern can make a decision slow.
-func compileGlob(glob, flags, star string) *regexp.Regexp {
+// RE2 matches in linear time, so no pattern can make a decision slow. The parsers bound the length
+// of globs, so compiling cannot fail in practice; if it does, the error does not carry the
+// expression, which can be large.
+func compileGlob(glob, flags, star string) (*regexp.Regexp, error) {
 	var b strings.Builder
 	b.WriteString(flags + "^")
 	for i, part := range strings.Split(glob, "**") {
@@ -121,7 +139,11 @@ func compileGlob(glob, flags, star string) *regexp.Regexp {
 		}
 	}
 	b.WriteString("$")
-	return regexp.MustCompile(b.String())
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return nil, errors.New("too complex; use fewer wildcards")
+	}
+	return re, nil
 }
 
 // checkRefName applies the rules of git check-ref-format to a full ref name, so that two
