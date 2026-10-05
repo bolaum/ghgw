@@ -160,16 +160,22 @@ branch is looked up through the REST API and cached for a few minutes.
 - `/api/v3/<path>` is forwarded to `https://api.github.com/<path>` with the owner's credential.
 - The owner and repository come from the path (`/repos/{owner}/{repo}/...`).
 - Each request is classified as an operation (method + path template, e.g. `pulls.create`).
-  Unknown operations are denied.
+  Unknown operations are denied. Bodies and query strings are not read, with one exception:
+  `pulls.create-review` is forwarded only when its JSON body has `event: COMMENT`, so agents
+  cannot approve or request changes (below).
 - `Link` headers (pagination) and `Location` headers are rewritten from `api.github.com` to the
-  gateway, so `gh` never sends the ghgw key to GitHub. Response bodies are not rewritten.
+  gateway, so `gh` never sends the ghgw key to GitHub, and a redirect gets a decision of its own
+  when the agent follows it. Response bodies are not rewritten. The gateway follows no redirect
+  itself, except the job log download: it fetches the signed storage URL GitHub redirects to
+  (`https` only, one hop, without the owner's credential or the agent's headers) and streams the
+  log, so agents never get that URL.
 
 API presets:
 
 | Preset | Allows |
 |---|---|
-| `read` | `GET` on repository endpoints: contents, commits, branches, pulls, issues, comments, reviews, checks, Actions runs/jobs/logs, releases. |
-| `pr` | `read` plus: create and update pull requests, pull request reviews and review comments, issues and issue comments, labels on issues and pulls, re-run of Actions jobs. |
+| `read` | `GET` on repository endpoints: the repository and file contents, branches, commits, pull requests with their files, reviews and comments, issues and their comments, check runs, commit statuses, Actions runs, jobs and job logs. |
+| `pr` | `read` plus: create and update pull requests, comment-only reviews and replies to review comments, comments on issues and pull requests, re-run of the failed jobs of an Actions run. |
 
 A grant's `api` is `read`, `pr`, or omitted (no REST operation); `pr` includes `read`.
 
@@ -180,19 +186,31 @@ Always denied in v0 (hard rules):
 - Merging pull requests.
 - Releases: creating one creates a tag, and tags cannot be pushed.
 - CI results: commit statuses, check runs and check suites, which an agent could forge.
-- Triggering workflows and deployments, which run with the repository's secrets. Re-running jobs
-  stays in the `pr` preset.
+- Triggering workflows and deployments, which run with the repository's secrets. Re-running the
+  failed jobs of a run stays in the `pr` preset.
 - Repository administration: settings, transfer, forking, topics, collaborators, hooks, keys,
   secrets, variables, environments, rulesets, branch protection, Pages, autolinks, security
   settings, Actions settings (permissions, runners, OIDC, caches).
 - Endpoints that are not repository-scoped (`/user`, `/orgs`, `/search`, ...), except
   `GET /rate_limit` and `GET /meta`.
 
-The exact operation table lives in code (`internal/core`), with tests, and in `docs/operations.md`.
-Each entry has a name, a method, a path template and exactly one class: `read` or `pr` (allowed by
-that preset), `global` (allowed for every enabled user, no grant needed), or one of the hard rules
-above (always denied, with that rule as the reason). `read` and `global` entries must be `GET`, and
-only `GET /rate_limit` and `GET /meta` can be `global`.
+The exact operation table lives in code (`internal/core`), with tests, and in `docs/operations.md`,
+which also gives the reasons for the rules below. Each entry has a name, a method, a path template
+and exactly one class: `read` or `pr` (allowed by that preset), `global` (allowed for every enabled
+user, no grant needed), or one of the hard rules above (always denied, with that rule as the
+reason). `read` and `global` entries must be `GET`, and only `GET /rate_limit` and `GET /meta` can
+be `global`.
+
+A request is matched against the table on its canonical path: the gateway decodes the path once,
+rejects a segment that is empty, `.` or `..`, or still contains `%`, `\` or a control character,
+and forwards the matched path with each segment escaped again, so GitHub sees the segments ghgw
+classified (`branches/agent%2Ffix` is forwarded as `branches/agent/fix`). A parameter that GitHub
+types as an integer (`{pull_number}`, `{comment_id}`, ...) matches ASCII digits only, so
+`pulls/comments` is not `pulls/{pull_number}`; any other parameter matches one segment, except the
+last parameter of a `read` template, which matches one or more (`contents/{path}`,
+`branches/{branch}`; bare `contents` is `repos.get-content`). When several templates match, a
+literal beats a parameter at the first position where they differ (`commits/{ref}/status` before
+`commits/{ref}`).
 
 The table is the allow-list. The hard rules are also enforced on their own, from method and path
 families that do not depend on the table: an entry that falls in a family must have that family's
@@ -200,11 +218,12 @@ class (the table is rejected otherwise), and a request is denied by the family's
 entry says. Path templates must be canonical (segments of lowercase letters, digits, `-` and `_`,
 or whole-segment `{parameters}`; no escapes, dots, backslashes or delimiters), so a family cannot be
 dodged by spelling. Parameters cannot hide a family either: the segment after
-`/repos/{owner}/{repo}` is always literal, a parameter stands for any one segment, and a `read`,
-`pr` or `global` template is rejected when some value of its parameters reaches a family
-(`pulls/{n}/{action}` reaches the merge rule). The REST proxy (M7) checks the families again on the
-concrete method and path of each request. The families, on paths under `/repos/{owner}/{repo}`
-("writes" means any method but `GET`):
+`/repos/{owner}/{repo}` is always literal, a parameter stands for any one segment (whatever it
+matches in a request), and a `read`, `pr` or `global` template is rejected when some value of its
+parameters reaches a family (`pulls/{n}/{action}` reaches the merge rule). The REST proxy (M7)
+checks the families again on the concrete method and path of each request, before the table, which
+also covers the longer values of a parameter that spans segments (`branches/agent/x/protection`).
+The families, on paths under `/repos/{owner}/{repo}` ("writes" means any method but `GET`):
 
 | Hard rule | Family |
 |---|---|
@@ -223,8 +242,9 @@ the table does not list is denied.
 
 Not supported in v0. `POST /api/graphql` returns a GraphQL error response that `gh` prints, telling
 the agent to use the REST API through `gh api`, with an example (section 8). Most `gh pr` and
-`gh issue` subcommands use GraphQL; agents use `gh api repos/...` instead. `gh run`, `gh release`,
-`gh workflow` and `gh api` use REST and work.
+`gh issue` subcommands use GraphQL; agents use `gh api repos/...` instead. v0 supports only
+`gh api`: `gh run`, `gh release` and `gh workflow` use REST too, but need operations the v0 table
+does not have.
 
 ### 5.5 ghgw endpoints
 
@@ -289,6 +309,13 @@ making the request; for a push it also shows the decision on each ref.
 
 - One credential per owner. v0: fine-grained PAT; the admin should limit it to the repositories
   agents may use.
+- The PAT needs these repository permissions for git and the v0 presets: Metadata read, Contents
+  read and write (clone, push), Pull requests read and write, Issues read and write (comments on
+  issues), Actions read and write (logs, re-running failed jobs), Commit statuses read. Leave out
+  every other permission, above all "Workflows" (so pushes cannot change `.github/workflows/`) and
+  "Administration". GitHub's permissions cannot stop merges (merging needs Contents write, like
+  push), so the merge hard rule is the only barrier. Fine-grained PATs have no "Checks" permission,
+  so check runs may only be readable on public repositories.
 - Added from stdin or a file (never as a command-line argument), verified with an API call.
 - Encrypted at rest with AES-GCM under a master key generated on first start (state directory,
   mode 0600) or given through `GHGW_MASTER_KEY`.
