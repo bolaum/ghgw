@@ -130,7 +130,9 @@ func (c *commandList) add(line []byte) error {
 		line, caps, _ = bytes.Cut(line, []byte{0})
 		c.capsKnown = true
 		for _, cap := range strings.Fields(string(caps)) {
-			switch cap {
+			// git takes a capability with a value as the capability.
+			name, _, _ := strings.Cut(cap, "=")
+			switch name {
 			case "report-status", "report-status-v2":
 				c.report = true
 			case "side-band-64k":

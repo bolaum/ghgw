@@ -46,6 +46,8 @@ func TestReadCommandList(t *testing.T) {
 			want: []core.RefUpdate{{Ref: "refs/heads/a", Kind: core.CreateRef}, {Ref: "refs/heads/b", Kind: core.UpdateRef}, {Ref: "refs/heads/c", Kind: core.DeleteRef}}, wantReport: true},
 		{name: "no capabilities", list: pkt(oldID+" "+newID+" refs/heads/a") + "0000",
 			want: []core.RefUpdate{{Ref: "refs/heads/a", Kind: core.UpdateRef}}},
+		{name: "capabilities with values", list: pkt(oldID+" "+newID+" refs/heads/a\x00report-status=x side-band-64k=") + "0000",
+			want: []core.RefUpdate{{Ref: "refs/heads/a", Kind: core.UpdateRef}}, wantReport: true, wantSideband: true},
 		{name: "side-band is not side-band-64k", list: pkt(oldID+" "+newID+" refs/heads/a\x00side-band report-status-v3") + "0000",
 			want: []core.RefUpdate{{Ref: "refs/heads/a", Kind: core.UpdateRef}}},
 		{name: "one trailing newline is dropped, as git does", list: pkt(oldID+" "+newID+" refs/heads/a\n") + pkt(oldID+" "+newID+" refs/heads/b\n\n") + "0000",
