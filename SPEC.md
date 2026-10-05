@@ -117,10 +117,12 @@ Keys look like `ghgw_<random>` and are stored as SHA-256 hashes. A missing or un
 
 - `GET /<owner>/<repo>.git/info/refs?service=git-upload-pack|git-receive-pack`,
   `POST /<owner>/<repo>.git/git-upload-pack`, `POST /<owner>/<repo>.git/git-receive-pack`
-  (the `.git` suffix is optional, as on GitHub).
+  (the `.git` suffix is optional, as on GitHub; repository names ending in `.git` are therefore
+  rejected, so `/o/x.git` always means repository `x`).
 - Forwarded to `https://github.com/<owner>/<repo>.git/...` with the owner's credential as Basic
   auth (`x-access-token:<token>`). Bodies are streamed, never buffered whole.
-- Fetch and clone (`upload-pack`) need `read`. Push (`receive-pack`) needs `write`.
+- Fetch and clone (`upload-pack`) need `read`. Push (`receive-pack`) needs `write`; the
+  receive-pack ref advertisement checks only that, and the push itself is checked ref by ref.
 
 Push checks read the ref update commands (pkt-lines before the pack) and reject the push if any
 command is not allowed:
@@ -134,7 +136,10 @@ command is not allowed:
 | Other refs (`refs/notes/...`, anything outside `refs/heads/`) | Never in v0 (hard rule). |
 | Invalid ref names (`git check-ref-format`) | Never. |
 
-If the default branch cannot be looked up, the push is rejected: the hard rule cannot be checked.
+If the default branch cannot be looked up or is not a valid branch name, the push is rejected: the
+hard rule cannot be checked. A push without ref update commands is rejected too. Refs and other
+names from the request are quoted when they contain anything but printable characters, wherever
+they are shown (reasons, `ng` lines, `explain`).
 
 A rejected push is answered by ghgw itself with a receive-pack report (`ng <ref> <reason>`, in the
 sideband when negotiated) and nothing reaches GitHub. Pushes are all-or-nothing: if one ref is
@@ -173,9 +178,24 @@ Always denied in v0 (hard rules):
 
 The exact operation table lives in code (`internal/core`), with tests, and in `docs/operations.md`.
 Each entry has a name, a method, a path template and exactly one class: `read` or `pr` (allowed by
-that preset), `global` (`GET /rate_limit`, `GET /meta`: allowed for every enabled user, no grant
-needed), or one of the hard rules above (always denied, with that rule as the reason). A hard-rule
-operation therefore cannot end up in a preset, and `read` and `global` entries must be `GET`.
+that preset), `global` (allowed for every enabled user, no grant needed), or one of the hard rules
+above (always denied, with that rule as the reason). `read` and `global` entries must be `GET`, and
+only `GET /rate_limit` and `GET /meta` can be `global`.
+
+The table is the allow-list. The hard rules are also enforced on their own, from method and path
+families that do not depend on the table: an entry that falls in a family must have that family's
+class (the table is rejected otherwise), and a request is denied by the family's rule whatever its
+entry says. The families, on path templates under `/repos/{owner}/{repo}`:
+
+| Hard rule | Family |
+|---|---|
+| Code change | Any method but `GET` under `contents/` and `git/`; writes to `merges`, `merge-upstream` and `pulls/{n}/update-branch` (they change branches without a push). |
+| Merge | Writes to `pulls/{n}/merge`. |
+| Administration | Writes to the repository itself; every method under `collaborators`, `invitations`, `hooks`, `keys`, `environments`, `rulesets`, on any `secrets` or `variables` segment, and on `branches/{branch}/protection`; writes to `branches/{branch}/rename`. |
+| Not repository-scoped | Every path outside `/repos/{owner}/{repo}` except `GET /rate_limit` and `GET /meta`. |
+
+The families are a backstop for the table, not a complete list of dangerous endpoints: anything
+the table does not list is denied.
 
 ### 5.4 GraphQL
 
@@ -198,12 +218,15 @@ the agent to use the REST API through `gh api`, with an example (section 8). Mos
   is cited.
 - Repository patterns are `owner/name` globs (`bolaum/*`, `acme/app`). The owner is literal, so a
   grant never reaches an owner the admin did not name. In the name, `*` matches any run of
-  characters (`acme/agent-*`); `**` is rejected. Owners and names match case-insensitively, like
-  GitHub.
-- Branch globs (`push`) follow GitHub's branch filter patterns and match branch names without
-  `refs/heads/`: `*` matches any run of characters except `/`, `**` also matches `/`
-  (`agent/**` matches `agent/x` and `agent/x/y`, not `agent`). They are case-sensitive, like git
-  refs. A glob that is not a valid branch name once its stars are removed is rejected.
+  characters (`acme/agent-*`); `**` is rejected, and so is a name ending in `.git`. Owners and
+  names match case-insensitively, like GitHub.
+- Branch globs (`push`) match branch names without `refs/heads/` and support a subset of GitHub's
+  branch filter patterns, with the same meaning: literals, `*` (any run of characters except `/`)
+  and `**` (any run, `/` included); `agent/**` matches `agent/x` and `agent/x/y`, not `agent`.
+  GitHub's other special characters (`?`, `+`, `[`, a leading `!`) are rejected rather than taken
+  literally. Globs are case-sensitive, like git refs. A glob must admit a valid branch name: with
+  each run of stars replaced by one letter it must pass `git check-ref-format` (`a.*.b` passes,
+  `*.lock` and `.*` are rejected).
 - `access` governs git and `api` governs REST, independently: a review agent can have
   `access: read` and `api: pr`. `push` globs require `access: write`.
 - User and group names are lowercase (`[a-z0-9][a-z0-9._-]*`, up to 64 characters). A disabled user
