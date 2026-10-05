@@ -20,6 +20,16 @@ func run(t *testing.T, stdin string, args ...string) (stdout, stderr string, err
 	return out.String(), errOut.String(), err
 }
 
+// mustRun runs ghgw and fails the test on error.
+func mustRun(t *testing.T, stdin string, args ...string) string {
+	t.Helper()
+	out, _, err := run(t, stdin, args...)
+	if err != nil {
+		t.Fatalf("ghgw %s: %v", strings.Join(args, " "), err)
+	}
+	return out
+}
+
 // testEnv isolates a test from the environment the commands read.
 func testEnv(t *testing.T) (stateDir string) {
 	t.Helper()
