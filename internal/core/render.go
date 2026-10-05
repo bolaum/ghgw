@@ -13,9 +13,9 @@ import (
 // large.
 const renderBudget = 1024
 
-// printable is the one renderer for identifiers that come from a request or from policy input:
+// Printable is the one renderer for identifiers that come from a request or from policy input:
 // every one goes through it before it is formatted into a reason or an error. See render.
-func printable(s string) string {
+func Printable(s string) string {
 	return render(s, renderBudget)
 }
 
@@ -69,7 +69,7 @@ func boundedList(items []string) string {
 	var b strings.Builder
 	b.WriteString(render(items[0], renderBudget-len(more(0))))
 	for i := 1; i < len(items); i++ {
-		item := printable(items[i])
+		item := Printable(items[i])
 		if b.Len()+len(", ")+len(item)+len(more(i)) > renderBudget {
 			b.WriteString(more(i - 1))
 			break

@@ -92,7 +92,7 @@ cmd/ghgw/            cobra commands (serve, admin commands, setup, credential, d
 internal/core/       domain and decisions; no HTTP; testable on its own
 internal/gateway/    git and REST proxies; calls core
 internal/adminapi/   thin HTTP handlers over core
-internal/store/      SQLite (modernc.org/sqlite: pure Go, no cgo)
+internal/store/      state directory: SQLite (modernc.org/sqlite: pure Go, no cgo), master key, sealed credentials
 internal/setup/      client side: git and gh configuration, undo, doctor
 pkg/api/             request/response types shared by the admin API and its clients
 pkg/adminclient/     Go client of the admin API (used by the CLI; later the MCP server)
@@ -110,8 +110,10 @@ The ghgw key is accepted as:
 - HTTP Basic password (git, through the `ghgw credential` helper; the username is ignored),
 - `Authorization: token <key>` or `Bearer <key>` (`gh`).
 
-Keys look like `ghgw_<random>` and are stored as SHA-256 hashes. A missing or unknown key gets a
-401 that names `ghgw setup` (section 8).
+Keys are `ghgw_` and 64 lowercase hex characters (256 random bits) and are stored only as SHA-256
+hashes: a key is shown once, when it is created or rotated. A key is looked up by the first 8
+bytes of its hash and then compared in full in constant time. A missing or unknown key gets a 401
+that names `ghgw setup` (section 8).
 
 ### 5.2 git (smart HTTP)
 
@@ -265,7 +267,9 @@ does not have.
 - No deny rules: only the union of grants plus the hard rules, so every decision has one readable
   reason ("allowed by grant 2 of group agents"). The number is the grant's ID, unique across the
   policy, so the admin can find and remove it; when several grants allow a request, the lowest ID
-  is cited.
+  is cited. IDs are assigned when a grant is created and never reused, so an old audit record never
+  names a newer grant.
+- A grant has at most 100 repository patterns and 100 push patterns.
 - Repository patterns are `owner/name` globs (`bolaum/*`, `acme/app`). The owner is literal, so a
   grant never reaches an owner the admin did not name. In the name, `*` matches any run of
   characters (`acme/agent-*`); `**` is rejected, and so is a name ending in `.git`. Owners and
@@ -329,8 +333,17 @@ making the request; for a push it also shows the decision on each ref.
   push), so the merge hard rule is the only barrier. Fine-grained PATs have no "Checks" permission,
   so check runs may only be readable on public repositories.
 - Added from stdin or a file (never as a command-line argument), verified with an API call.
-- Encrypted at rest with AES-GCM under a master key generated on first start (state directory,
-  mode 0600) or given through `GHGW_MASTER_KEY`.
+- A token is 1 to 1024 visible ASCII characters (no spaces or line breaks: it goes into an HTTP
+  header).
+- Encrypted at rest with AES-256-GCM under a master key generated on first start (state directory,
+  mode 0600) or given through `GHGW_MASTER_KEY`. The key is 32 random bytes in standard base64,
+  the same in the file and in the variable. Each encryption has a random nonce, and the owner
+  (lowercased) is authenticated with the ciphertext, so a credential copied to another owner fails
+  to decrypt instead of being sent for the wrong owner.
+- The database holds a value sealed under the master key, so a wrong key stops `ghgw serve` at
+  start with a clear error. A missing key file stops it too once the database exists: a new key
+  would only lock the existing credentials away. So does a database with credentials but no such
+  value. ghgw never replaces an existing key file.
 - The token expiry GitHub returns in the `github-authentication-token-expiration` response header
   is stored; ghgw warns in the log, in `ghgw owner list` and in `doctor` before it expires.
 - Later: GitHub App credentials (installation tokens minted per request, scoped to the repository).
@@ -357,12 +370,18 @@ ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, acm
 
 ## 9. Admin
 
+v0 ships only the local admin commands of milestone M3; the admin API, the admin client and the
+full CLI below are v1 (section 17).
+
 ### 9.1 Admin API
 
-JSON over HTTPS on the admin listener, `/admin/v1/...`, authenticated with an admin token
-(`ghgwa_<random>`). On first start `ghgw serve` creates one, stores it in the state directory
-(mode 0600) and prints it once. All admin clients (CLI now; MCP server and web UI later) use
-`pkg/adminclient`.
+JSON over HTTPS on the admin listener, `/admin/v1/...`, authenticated with an admin token (`ghgwa_`
+and 64 lowercase hex characters, stored hashed like user keys). On first start (no admin token in
+the database) `ghgw serve` creates one, writes it to `admin-token` in the state directory (mode
+0600), stores its hash and prints the file's path, never the token: stdout ends up in logs. If
+`admin-token` already exists then (left by an interrupted first start or an earlier database), it
+refuses to start rather than revive a token that may have been shared: the admin removes the file.
+All admin clients (CLI now; MCP server and web UI later) use `pkg/adminclient`.
 
 Resources (JSON; lists are paginated with `?cursor=`; errors are `{"error": {"code", "message"}}`):
 
@@ -449,8 +468,13 @@ logged with `slog` to stdout. Secrets are never logged.
 
 - Config file (YAML) plus `GHGW_*` environment overrides: listen addresses, TLS, state directory,
   retention.
-- State directory: `$XDG_STATE_HOME/ghgw/` of the service user (SQLite, master key, first admin
-  token).
+- State directory: `$XDG_STATE_HOME/ghgw/` of the service user: `ghgw.db` (SQLite, with its
+  `-wal` and `-shm` files), `master.key` and `admin-token`. ghgw creates the directory with mode
+  0700 and the files with mode 0600 from the start, and never replaces an existing file; a file left
+  partial by an interrupted first start is reported as malformed, with what to do. It refuses to
+  start when the directory or one of these files is a symbolic link, is owned by another user, or
+  gives any permission to group or others; the error names the `chmod` to run. Only the directory
+  itself is checked, not its parents.
 - Dynamic state (users, groups, grants, owners) lives in SQLite and changes through the admin API.
 
 ## 13. TLS
@@ -478,40 +502,40 @@ logged with `slog` to stdout. Secrets are never logged.
 - Logging: `log/slog`, JSON in production, text on a TTY.
 - Upstream base URLs (`https://github.com`, `https://api.github.com`) are configurable so tests can
   point them at a fake GitHub (`httptest`).
-- SQLite migrations are embedded SQL files applied in order at startup.
+- SQLite migrations are embedded SQL files (`NNNN_name.sql`, numbered from 1 without gaps) applied
+  in order at startup, in one transaction; `PRAGMA user_version` records how many are applied, and
+  a database from a newer ghgw, or with a negative version, is refused.
 
 ## 16. v0 milestones
 
-Each milestone is one pull request, reviewed before the next starts. "Done" means the listed checks
-pass in CI.
+v0 is done when the coding agents that develop ghgw work through ghgw: no GitHub credential in
+their containers. Anything that use does not need waits for v1 (section 17). Each milestone is one
+pull request; "done" means the listed checks pass in CI.
 
 | # | Scope | Done when |
 |---|---|---|
-| M0 | Module, cobra root, `ghgw version`, Makefile, CI (gofmt, vet, staticcheck, tests) | CI is green on the PR |
-| M1 | `internal/core`: users, groups, grants, hard rules, `Decide`, explain; in memory | Table tests cover allow, deny and the reason for each rule in sections 5 and 6 |
-| M2 | `internal/store` (SQLite, migrations), owners with encrypted credentials, master key, first admin token | Store tests; credentials are unreadable in the database file |
-| M3 | Admin API + `pkg/adminclient` + CLI for users, groups, grants, owners, policy, explain | A script creates the policy of section 6 through the CLI and `explain` answers as expected, `--json` included |
+| M0 | Module, cobra root, `ghgw version`, Makefile, CI | Done |
+| M1 | `internal/core`: users, groups, grants, hard rules, `Decide`, explain | Done |
+| M2 | `internal/store` (SQLite, migrations), owners with sealed credentials, master key, keys and tokens | Store tests; credentials are unreadable in the database file |
+| M3 | Local admin, no admin API: the policy (users with key hashes, groups, grants) in a YAML file read by `ghgw serve`; `ghgw key new` (shows a key once, prints its hash for the file); `ghgw owner add\|list\|remove` on the local store (token from stdin or a file); `ghgw explain` against the file (`--default-branch` for pushes) | A script writes the policy of section 6, adds an owner, and `explain` answers as expected |
 | M4 | Gateway listener, authentication, git fetch/clone proxy | `git clone` through the gateway works against a fake upstream; unknown keys and repos get the section 8 messages |
 | M5 | Push checks and receive-pack reports | Push to an allowed branch passes; default branch, tags and other branches are rejected with clear `ng` lines; nothing reaches the upstream on rejection |
-| M6 | `docs/operations.md`: the REST operation table for `read` and `pr` (proposal only, no code) | Approved by the maintainer |
-| M7 | REST proxy: classification, presets, hard rules, `Link`/`Location` rewrite, GraphQL guidance | `gh api` creates a pull request against the fake upstream; denied operations return guidance |
-| M8 | Client side: `setup` (local and `--global`, `--undo`), `credential`, `doctor`, `whoami` | In a scratch repository, one `ghgw setup` makes `git push` and `gh api` go through the gateway |
-| M9 | Audit (store, retention, `ghgw audit --follow`), TLS files and `--self-signed`, goreleaser, container image | Release snapshot builds linux/amd64 and linux/arm64; audit shows the requests of the M8 test |
+| M6 | `docs/operations.md`: the REST operation table, only what an agent needs to work on pull requests through `gh api` | Approved by the maintainer |
+| M7 | REST proxy with that table: classification, hard rules, `Link`/`Location` rewrite, GraphQL guidance | `gh api` creates and comments on a pull request against the fake upstream; denied operations return guidance |
+| M8 | Client side, minimal: `ghgw setup --global` (git `insteadOf`, credential helper, the gh host), `ghgw credential`, `ghgw whoami` | In a scratch repository, one `ghgw setup` makes `git push` and `gh api` go through the gateway |
+| M9 | Running it: one request log line per request (`slog`, stdout), TLS from certificate and key files, an example systemd unit | The agents developing ghgw work through a deployed gateway with no PAT in their containers |
 
 ## 17. Roadmap
 
-- **v0**: git (fetch, clone, push with ref checks), REST with presets, GraphQL guidance, users,
-  groups, grants, owners with fine-grained PATs, admin API and CLI, `setup`/`doctor`, audit.
-- **v1**: GraphQL (operation allowlist, node ID → owner mapping), `no_force` on grants (ancestry
-  from the pack), GitHub App credentials, per-user rate limits.
+- **v0**: section 16.
+- **v1**: the admin API, `pkg/adminclient` and the full CLI of section 9; audit in the store with
+  retention and `ghgw audit`; presets beyond the v0 table (labels with per-grant allowlists,
+  reviewers, re-runs, `gh run`); `setup --undo` and `doctor`; `--self-signed`; GraphQL (operation
+  allowlist, node ID → owner mapping); `no_force` on grants (ancestry from the pack); GitHub App
+  credentials; per-user rate limits; goreleaser builds and a container image.
 - **Later**: MCP admin server, web UI, GitHub Enterprise upstreams, darwin builds.
 
 ## 18. Open questions
 
-- The exact REST operation table for the `read` and `pr` presets (milestone M6).
 - Which credential `GET /rate_limit` uses: the path names no owner (milestone M7).
-- How `ghgw explain` gets the default branch for a push: looked up like the gateway does, or given
-  as a flag (milestone M3).
-- Whether agents get a read-only view of their own access beyond `whoami` (e.g. `ghgw whoami` in
-  `doctor` output is enough?).
-- Several admins with their own tokens, or one admin token in v0.
+- Whether agents get a read-only view of their own access beyond `whoami`.

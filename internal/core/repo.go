@@ -28,16 +28,16 @@ type Repo struct {
 func ParseRepo(s string) (Repo, error) {
 	owner, name, ok := strings.Cut(s, "/")
 	if !ok {
-		return Repo{}, fmt.Errorf("repository %s: want owner/name", printable(s))
+		return Repo{}, fmt.Errorf("repository %s: want owner/name", Printable(s))
 	}
 	if err := checkOwnerName(owner); err != nil {
-		return Repo{}, fmt.Errorf("repository %s: %w", printable(s), err)
+		return Repo{}, fmt.Errorf("repository %s: %w", Printable(s), err)
 	}
 	if !repoNameRE.MatchString(name) || name == "." || name == ".." {
-		return Repo{}, fmt.Errorf("repository %s: name must be 1 to 100 letters, digits, '.', '-' or '_'", printable(s))
+		return Repo{}, fmt.Errorf("repository %s: name must be 1 to 100 letters, digits, '.', '-' or '_'", Printable(s))
 	}
 	if hasGitSuffix(name) {
-		return Repo{}, fmt.Errorf("repository %s: write the name without the .git suffix", printable(s))
+		return Repo{}, fmt.Errorf("repository %s: write the name without the .git suffix", Printable(s))
 	}
 	return Repo{owner: owner, name: name}, nil
 }
@@ -63,14 +63,14 @@ func (r Repo) String() string {
 
 func checkOwnerName(owner string) error {
 	if !ownerNameRE.MatchString(owner) {
-		return fmt.Errorf("owner %s must be 1 to 100 letters, digits, '-' or '_', starting with a letter or digit", printable(owner))
+		return fmt.Errorf("owner %s must be 1 to 100 letters, digits, '-' or '_', starting with a letter or digit", Printable(owner))
 	}
 	return nil
 }
 
 func checkPrincipalName(kind, name string) error {
 	if !principalNameRE.MatchString(name) {
-		return fmt.Errorf("%s name %s must be 1 to 64 lowercase letters, digits, '.', '-' or '_', starting with a letter or digit", kind, printable(name))
+		return fmt.Errorf("%s name %s must be 1 to 64 lowercase letters, digits, '.', '-' or '_', starting with a letter or digit", kind, Printable(name))
 	}
 	return nil
 }

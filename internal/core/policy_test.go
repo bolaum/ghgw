@@ -1,6 +1,7 @@
 package core
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -133,6 +134,8 @@ func TestNewPolicyValidation(t *testing.T) {
 				zeroPush.Push = []BranchGlob{{}}
 				noKind := grant(t, 10, "user rpi01-agent", bolaum, AccessRead, nil, "")
 				noKind.Holder.Kind = 0
+				tooManyRepos := grant(t, 11, "user rpi01-agent", slices.Repeat(bolaum, MaxGrantPatterns+1), AccessRead, nil, "")
+				tooManyPush := grant(t, 12, "user rpi01-agent", bolaum, AccessWrite, slices.Repeat([]string{"agent/**"}, MaxGrantPatterns+1), "")
 				return State{
 					Users:  users,
 					Groups: groups,
@@ -148,6 +151,8 @@ func TestNewPolicyValidation(t *testing.T) {
 						grant(t, 8, "user rpi01-agent", bolaum, AccessRead, nil, "admin"),
 						zeroPush,
 						noKind,
+						tooManyRepos,
+						tooManyPush,
 					},
 				}
 			},
@@ -163,6 +168,8 @@ func TestNewPolicyValidation(t *testing.T) {
 				"grant 8 of user rpi01-agent: api must be read or pr (or empty for none), not admin",
 				"grant 9 of user rpi01-agent: has an empty push pattern",
 				"grant 10 of holder rpi01-agent: the holder must be a user or a group",
+				"grant 11 of user rpi01-agent: has 101 repository patterns; a grant has at most 100",
+				"grant 12 of user rpi01-agent: has 101 push patterns; a grant has at most 100",
 			},
 		},
 	}
