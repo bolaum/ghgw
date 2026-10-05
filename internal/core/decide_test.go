@@ -769,6 +769,10 @@ func TestDecideREST(t *testing.T) {
 			{Name: "pulls.merge", Method: "PUT", Path: "/repos/{owner}/{repo}/pulls/{pull_number}/merge", Class: ClassPR},
 			{Name: "hooks.list", Method: "GET", Path: "/repos/{owner}/{repo}/hooks", Class: ClassRead},
 			{Name: "users.get", Method: "GET", Path: "/user", Class: ClassGlobal},
+			// Parameters that some values turn into a hard-rule path.
+			{Name: "pulls.action", Method: "PUT", Path: "/repos/{owner}/{repo}/pulls/{pull_number}/{action}", Class: ClassPR},
+			{Name: "workflows.action", Method: "POST", Path: "/repos/{owner}/{repo}/actions/workflows/{id}/{action}", Class: ClassPR},
+			{Name: "branches.part", Method: "GET", Path: "/repos/{owner}/{repo}/branches/{branch}/{part}", Class: ClassRead},
 		} {
 			table.byName[op.Name] = op
 		}
@@ -789,6 +793,12 @@ func TestDecideREST(t *testing.T) {
 				want: result{Reason: "hooks.list is not allowed: repository administration is not available through ghgw"}},
 			{name: "unscoped endpoint as global", user: "a", op: REST{Name: "users.get"},
 				want: result{Reason: "users.get is not allowed: only repository endpoints (repos/{owner}/{repo}/...), rate_limit and meta are available"}},
+			{name: "parameterized pulls action in a preset", user: "a", repo: "bolaum/x", op: REST{Name: "pulls.action"},
+				want: result{Reason: "pulls.action is not allowed: " + codeChange}},
+			{name: "parameterized workflow action in a preset", user: "a", repo: "bolaum/x", op: REST{Name: "workflows.action"},
+				want: result{Reason: "workflows.action is not allowed: triggering workflows and deployments is not available through ghgw; push to a branch and let CI run"}},
+			{name: "parameterized branch part in a preset", user: "a", repo: "bolaum/x", op: REST{Name: "branches.part"},
+				want: result{Reason: "branches.part is not allowed: repository administration is not available through ghgw"}},
 		})
 	})
 
