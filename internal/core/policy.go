@@ -132,6 +132,8 @@ type State struct {
 // Policy is a validated State, read-only and safe for concurrent use. It decides requests.
 type Policy struct {
 	users map[string]User
+	// groups holds each user's groups, ordered by name.
+	groups map[string][]string
 	// grants holds each user's effective grants, ordered by ID.
 	grants map[string][]*Grant
 	// owners holds the lowercased names of the owners that have a credential.
@@ -145,6 +147,7 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 	p := &Policy{
 		rest:   rest,
 		users:  make(map[string]User, len(s.Users)),
+		groups: make(map[string][]string, len(s.Users)),
 		grants: make(map[string][]*Grant, len(s.Users)),
 		owners: make(map[string]bool, len(s.Owners)),
 	}
@@ -180,8 +183,12 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 				errs = append(errs, fmt.Errorf("group %s: member %s is listed twice", Printable(g.Name), Printable(m)))
 			default:
 				members[g.Name] = append(members[g.Name], m)
+				p.groups[m] = append(p.groups[m], g.Name)
 			}
 		}
+	}
+	for _, gs := range p.groups {
+		slices.Sort(gs)
 	}
 
 	ids := make(map[int]bool, len(s.Grants))
