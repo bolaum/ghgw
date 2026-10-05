@@ -95,7 +95,7 @@ internal/adminapi/   thin HTTP handlers over core
 internal/store/      state directory: SQLite (modernc.org/sqlite: pure Go, no cgo), master key, sealed credentials
 internal/policyfile/ the policy file (v0): users with key hashes, groups and grants in YAML
 internal/setup/      client side: git and gh configuration, undo, doctor
-pkg/api/             request/response types shared by the admin API and its clients
+pkg/api/             request/response types shared by the admin API, ghgw's own endpoints and their clients
 pkg/adminclient/     Go client of the admin API (used by the CLI; later the MCP server)
 ```
 
@@ -328,8 +328,17 @@ does not have.
 
 ### 5.5 ghgw endpoints
 
-- `GET /_ghgw/whoami`: user, groups and effective grants. Used by `setup`, `doctor` and error
-  messages.
+- `GET /_ghgw/whoami`: user, groups and effective grants. Used by `setup`, `whoami` and `doctor`.
+  Authenticated like every request; a disabled user gets a 403 that says so. The answer is JSON:
+
+  ```json
+  {"user": "rpi01-agent", "groups": ["agents"], "grants": [
+    {"id": 1, "holder": {"kind": "group", "name": "agents"}, "repos": ["bolaum/*"],
+     "access": "write", "push": ["agent/**"], "api": "pr"}]}
+  ```
+
+  Grants are ordered by ID; `api` is `read`, `pr` or `none`. Any other method is a 405, and any
+  other path under `/_ghgw/` a 404, both answered as JSON errors like REST (section 5.3).
 
 ## 6. Policy
 
@@ -569,28 +578,49 @@ CLI rules, so people and LLMs can both drive it:
 ## 10. Client side
 
 ```
-GHGW_URL=https://ghgw.example GHGW_TOKEN=ghgw_... ghgw setup            # this repository
 GHGW_URL=https://ghgw.example GHGW_TOKEN=ghgw_... ghgw setup --global   # the user's account
-ghgw setup --undo [--global]
+ghgw setup --global                                                     # again, from the saved config
+ghgw whoami
 ```
 
-`setup`:
+v0 sets up the user's whole account only; `setup` for one repository and `setup --undo` are v1.
+`setup --global`:
 
 1. checks the key with `/_ghgw/whoami` and shows the user and its grants;
 2. saves the URL and key in `$XDG_CONFIG_HOME/ghgw/config.yaml` (mode 0600); the variables are
-   only needed the first time;
+   only needed the first time, and each one set overrides the saved value;
 3. sets `url.<gateway>/.insteadOf` for `https://github.com/`, `git@github.com:` and
-   `ssh://git@github.com/` (`git config --local`, or `--global`);
-4. sets `ghgw credential` as git's credential helper for the gateway URL;
-5. logs `gh` in for the gateway host (`gh auth login --hostname <host> --with-token`), if `gh` is
-   installed;
-6. prints what changed.
+   `ssh://git@github.com/` (`git config --global`);
+4. sets `ghgw credential` as git's only credential helper for the gateway URL:
+   `credential.<gateway>.helper` is an empty value, which drops the helpers set for every URL so
+   none of them is given the key to store, then `!<path of this ghgw> credential`;
+5. logs `gh` in to the gateway host, if `gh` is installed, by writing the host to gh's `hosts.yml`
+   (`$GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`; mode 0600) as
+   `gh auth login --insecure-storage` does, with the ghgw user as gh's user and `git_protocol:
+   https`, and every other host kept. `gh auth login` itself would check the key against the API
+   root and GraphQL, which the gateway does not serve;
+6. prints each setting, changed or unchanged, and notes on what it left out (`--json` too).
 
-`gh` then picks the gateway as its host from the rewritten remote URLs. Outside a repository,
-`GH_HOST=<gateway host>` does the same.
+It changes nothing when the key does not work or when git's global configuration already rewrites
+one of those URLs to another base; the error names the git command that removes that rewrite.
+Running it again changes only what is missing or different, so it is also how a new key or URL is
+saved. The URL is `https://HOST[:PORT]` and nothing else; errors never quote the key.
 
-`ghgw credential` implements git's credential helper protocol and returns the saved key.
-`ghgw doctor` checks that git and gh really go through the gateway, the key works and the
+`gh` needs the gateway on port 443: it looks up a host's token, and matches remotes to hosts, by
+host name without the port. With another port `setup` configures git only and says so. `gh api`
+sends its requests to gh's default host: the gateway when it is the only host in `hosts.yml`, as in
+the agents' containers, which hold no GitHub credential; otherwise github.com, and
+`GH_HOST=<gateway host>` selects the gateway (`setup` notes it). In a repository, `gh api` fills
+`{owner}` and `{repo}` from the rewritten remote URL.
+
+`ghgw credential` implements git's credential helper protocol: for `get` it returns the saved key
+when git asks for the gateway itself (`https` and the gateway's host and port), and nothing for any
+other host; `store` and `erase` do nothing. It reads only the saved config. `ghgw whoami` shows the
+user, its groups and its effective grants (`--json`: the gateway's answer); the variables override
+the saved values. The config file must be a regular file without permissions for group or others,
+or the commands refuse it with the `chmod` to run.
+
+`ghgw doctor` (v1) checks that git and gh really go through the gateway, the key works and the
 certificate is trusted.
 
 ## 11. Audit
@@ -619,8 +649,8 @@ logged with `slog` to stdout. Secrets are never logged.
   ghgw serve [--listen ADDR] --tls-cert F --tls-key F [--policy F] [--state-dir D]
   ```
 
-  `--listen` defaults to `:8443`. The log goes to stdout. On `SIGINT` or `SIGTERM` requests in
-  flight get 30 s to finish.
+  `--listen` defaults to `:8443`; `gh` needs the gateway on port 443 (section 10). The log goes to
+  stdout. On `SIGINT` or `SIGTERM` requests in flight get 30 s to finish.
 
 ## 13. TLS
 
@@ -671,7 +701,7 @@ pull request; "done" means the listed checks pass in CI.
 | M5 | Push checks and receive-pack reports | Push to an allowed branch passes; default branch, tags and other branches are rejected with clear `ng` lines; nothing reaches the upstream on rejection |
 | M6 | `docs/operations.md`: the REST operation table, only what an agent needs to work on pull requests through `gh api` | Approved by the maintainer |
 | M7 | REST proxy with that table: classification, hard rules, `Link`/`Location` rewrite, GraphQL guidance | `gh api` creates and comments on a pull request against the fake upstream; denied operations return guidance |
-| M8 | Client side, minimal: `ghgw setup --global` (git `insteadOf`, credential helper, the gh host), `ghgw credential`, `ghgw whoami` | In a scratch repository, one `ghgw setup` makes `git push` and `gh api` go through the gateway |
+| M8 | Client side, minimal: `ghgw setup --global` (git `insteadOf`, credential helper, the gh host), `ghgw credential`, `ghgw whoami` | In a scratch home, one `ghgw setup --global` makes `git clone`, `git push` and `gh api` go through the gateway |
 | M9 | Running it: one request log line per request (`slog`, stdout), TLS from certificate and key files, an example systemd unit | The agents developing ghgw work through a deployed gateway with no PAT in their containers |
 
 ## 17. Roadmap
@@ -679,9 +709,10 @@ pull request; "done" means the listed checks pass in CI.
 - **v0**: section 16.
 - **v1**: the admin API, `pkg/adminclient` and the full CLI of section 9.3; audit in the store with
   retention and `ghgw audit`; presets beyond the v0 table (labels with per-grant allowlists,
-  reviewers, re-runs, `gh run`); `setup --undo` and `doctor`; `--self-signed`; GraphQL (operation
-  allowlist, node ID → owner mapping); `no_force` on grants (ancestry from the pack); GitHub App
-  credentials; per-user rate limits; goreleaser builds and a container image.
+  reviewers, re-runs, `gh run`); `setup` for one repository, `setup --undo` and `doctor`;
+  `--self-signed`; GraphQL (operation allowlist, node ID → owner mapping); `no_force` on grants
+  (ancestry from the pack); GitHub App credentials; per-user rate limits; goreleaser builds and a
+  container image.
 - **Later**: MCP admin server, web UI, GitHub Enterprise upstreams, darwin builds.
 
 ## 18. Open questions
