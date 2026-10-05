@@ -139,15 +139,20 @@ key.
   `Content-Type`, `Expires` and `Pragma` back; the client's `Authorization` holds its ghgw key.
 - The upstream is `https` only, used without a proxy from the environment, and its redirects are
   not followed, so the credential goes to the configured GitHub host only.
-- Only a 200 with git's content type is passed on. A 401 or 403 from GitHub is a 502 that names the
+- Only a 200 with git's content type is passed on, without GitHub's 1xx answers and trailers; no
+  trailer of the client goes upstream either. A 401 or 403 from GitHub is a 502 that names the
   owner's credential (a 401 passed on would make git discard the ghgw key), a 404 says GitHub has
   no such repository that the credential can read, a redirect is a 502 that suggests a renamed
-  repository, and any other answer is a 502, or a 504 when GitHub did not answer in time. The
-  repository asked for and the status code are in the message, never what GitHub wrote.
-- Limits: a fetch negotiation body is at most 64 MiB (413 otherwise); a request, reading its body
-  and writing the answer included, has at most 30 minutes; GitHub gets 10 s to connect, 10 s for
-  the TLS handshake and 2 minutes to send its response headers. A client has 10 s to send its
-  request headers, at most 64 KiB of them.
+  repository, and any other answer is a 502, or a 504 when the request did not finish in time. The
+  repository asked for and the status code are in the message, never what GitHub wrote, and the
+  log names the kind of failure, never the text of a transport error, which can quote GitHub's
+  bytes.
+- Limits: a fetch negotiation body is at most 64 MiB (413, before anything reaches GitHub when the
+  length is announced); a forwarded request, reading its body and writing the answer included, has
+  at most 30 minutes, and a request that is not forwarded (denied, unauthenticated, malformed) 30 s;
+  GitHub gets 10 s to connect, 10 s for the TLS handshake and 2 minutes to send its response
+  headers. Over HTTP/1.1 a client has 10 s to send its request headers; request headers are at most
+  64 KiB.
 - Every answer ghgw writes itself is `text/plain`, `ghgw: ` and the reason, which git shows to the
   agent as `remote: ghgw: ...`.
 - Fetch and clone (`upload-pack`) need `read`. Push (`receive-pack`) needs `write`; the
@@ -332,8 +337,10 @@ and their credentials are not in it: they are in the store (section 7). `ghgw se
 start with an invalid file. It checks the file on every request and reads it again when it changed,
 and reads the owners from the store on every request, so edits and `ghgw owner add|remove` count
 from the next request. While the file is missing or invalid, every request is denied with a 503 and
-the log says what is wrong, once per change: keeping the previous policy could keep access the admin
-meant to remove.
+the log says what is wrong, once per problem: keeping the previous policy could keep access the
+admin meant to remove. A file that cannot be read (an I/O error) is read again on the next request.
+While the store cannot be read, every request is denied with a 503 that says so, and the log says
+why.
 
 ```yaml
 groups:
@@ -586,9 +593,10 @@ logged with `slog` to stdout. Secrets are never logged.
 
 ## 13. TLS
 
-- v0: certificate and key files (reloaded when they change), or `--self-signed` for development.
-  Both files are checked at every handshake; a pair that cannot be read (a renewal half written) is
-  logged and the previous certificate is served until the pair is whole. TLS 1.2 or later.
+- v0: certificate and key files (reloaded when they change); `--self-signed` for development comes
+  in v1 (section 17). Both files are checked at every handshake; a pair that cannot be read (a
+  renewal half written) is logged once per problem, and the previous certificate is served while
+  the pair is tried again at each handshake. TLS 1.2 or later.
 - Production needs a certificate the clients trust; `gh` uses the system roots. A DNS-01 ACME
   certificate is the easy path for a gateway that is not publicly reachable.
 
