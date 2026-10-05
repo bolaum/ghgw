@@ -131,7 +131,7 @@ func TestGitClone(t *testing.T) {
 			name, url, want string
 		}{
 			{name: "repository not granted", url: gateway + "/acme/secret.git",
-				want: "remote: ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*\n"},
+				want: "remote: ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, bolaum/pushable\n"},
 			{name: "unknown key", url: unknown + "/bolaum/ghgw.git",
 				want: "remote: ghgw: unknown ghgw key; run ghgw setup again with the key the admin gave you, or ask the admin for a new one\n"},
 			{name: "repository missing upstream", url: gateway + "/bolaum/missing.git",

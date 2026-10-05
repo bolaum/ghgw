@@ -103,8 +103,12 @@ func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap, err := g.policy.current(r.Context())
-	if err != nil {
-		// The error is in the log; it may name paths and policy details the agent has no use for.
+	// The errors are in the log; they may name paths and policy details the agent has no use for.
+	switch {
+	case errors.Is(err, errStore):
+		fail(w, http.StatusServiceUnavailable, "the gateway cannot read its store, so every request is denied; try again later, or ask the admin to check the gateway's log")
+		return
+	case err != nil:
 		fail(w, http.StatusServiceUnavailable, "the gateway has no valid policy, so every request is denied; ask the admin to fix the policy file (the gateway's log says what is wrong)")
 		return
 	}
@@ -112,13 +116,17 @@ func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var op core.Operation = core.Fetch{}
 	if q.service == receivePack {
-		fail(w, http.StatusNotImplemented, "this gateway does not accept pushes yet; ask the admin")
-		return
+		op = core.PushAccess{}
 	}
-	d := snap.policy.Decide(core.Request{User: user, Repo: q.repo, Op: core.Fetch{}})
+	d := snap.policy.Decide(core.Request{User: user, Repo: q.repo, Op: op})
 	if !d.Allowed {
 		fail(w, http.StatusForbidden, "%s", d.Reason)
+		return
+	}
+	if q.service == receivePack {
+		fail(w, http.StatusNotImplemented, "this gateway does not accept pushes yet; ask the admin")
 		return
 	}
 	token, err := g.store.Credential(r.Context(), q.repo.Owner())

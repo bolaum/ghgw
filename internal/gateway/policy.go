@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"slices"
@@ -35,13 +37,17 @@ type snapshot struct {
 	policy *core.Policy
 }
 
-// current returns the policy in force. An error means there is none: the file is missing or
-// invalid, and every request is denied until the admin fixes it. Keeping the previous policy
-// instead would keep access the admin meant to remove.
+// errStore marks a failure to read the owners from the store: the policy itself may be fine.
+var errStore = errors.New("cannot read the owners from the store")
+
+// current returns the policy in force. An error means there is none: the store cannot be read
+// (errStore), or the file is missing or invalid, and every request is denied until the admin
+// fixes it. Keeping the previous policy instead would keep access the admin meant to remove.
 func (s *policySource) current(ctx context.Context) (*snapshot, error) {
 	list, err := s.store.Owners(ctx)
 	if err != nil {
-		return nil, err
+		s.log.Error("cannot read the owners from the store; every request is denied", "error", err)
+		return nil, fmt.Errorf("%w: %w", errStore, err)
 	}
 	owners := make([]string, len(list))
 	for i, o := range list {
@@ -52,17 +58,20 @@ func (s *policySource) current(ctx context.Context) (*snapshot, error) {
 	defer s.mu.Unlock()
 	// The file is checked before it is read, so a change after the check is seen next time.
 	stamp, err := os.Stat(s.path)
-	switch {
-	case err != nil && s.stamp == nil && s.err != nil:
-		// Still unreadable; logged already.
-		return nil, s.err
-	case err != nil:
+	if err != nil {
 		return nil, s.failed(nil, fmt.Errorf("read the policy file: %w", err))
-	case s.stamp != nil && sameStamp(s.stamp, stamp) && slices.Equal(s.owners, owners):
+	}
+	if s.stamp != nil && sameStamp(s.stamp, stamp) && slices.Equal(s.owners, owners) {
 		return s.snap, s.err
 	}
 	s.owners = owners
 	pf, err := policyfile.Load(s.path)
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		// Reading failed (out of file descriptors, an I/O error): try again on the next request
+		// rather than wait for the file to change.
+		stamp = nil
+	}
 	if err != nil {
 		return nil, s.failed(stamp, err)
 	}
@@ -77,11 +86,13 @@ func (s *policySource) current(ctx context.Context) (*snapshot, error) {
 	return s.snap, nil
 }
 
-// failed records that the file with stamp (nil when it is unreadable) gives no policy, and logs
-// why. s.mu must be held.
+// failed records that there is no policy, for the file with stamp (nil to read the file again on
+// the next request), and logs why when that changed. s.mu must be held.
 func (s *policySource) failed(stamp os.FileInfo, err error) error {
+	if s.err == nil || s.err.Error() != err.Error() {
+		s.log.Error("no valid policy: every request is denied until the policy file is fixed", "path", s.path, "error", err)
+	}
 	s.stamp, s.snap, s.err = stamp, nil, err
-	s.log.Error("no valid policy: every request is denied until the policy file is fixed", "path", s.path, "error", err)
 	return err
 }
 

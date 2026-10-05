@@ -121,8 +121,15 @@ func TestServe(t *testing.T) {
 	if resp, err := get(second, "second.example"); err != nil || resp.StatusCode != 401 {
 		t.Fatalf("GET after a broken renewal = %v, %v; want the previous certificate", resp, err)
 	}
-	if !strings.Contains(e.logs.String(), "cannot read the new TLS certificate") {
-		t.Errorf("logs = %s, want the broken renewal logged", e.logs.String())
+	if resp, err := get(second, "second.example"); err != nil || resp.StatusCode != 401 {
+		t.Fatalf("GET after a broken renewal = %v, %v; want the previous certificate", resp, err)
+	}
+	if n := strings.Count(e.logs.String(), "cannot read the new TLS certificate"); n != 1 {
+		t.Errorf("logs = %s, want the broken renewal logged once", e.logs.String())
+	}
+	third := writeCert(t, certFile, keyFile, "third.example")
+	if resp, err := get(third, "third.example"); err != nil || resp.StatusCode != 401 {
+		t.Fatalf("GET after the renewal was fixed = %v, %v; want the new certificate", resp, err)
 	}
 
 	cancel()

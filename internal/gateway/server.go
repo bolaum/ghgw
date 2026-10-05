@@ -21,9 +21,11 @@ type Certificate struct {
 	log               *slog.Logger
 
 	mu sync.Mutex
-	// stamps are the files' stats when cert was read, or when reading them last failed.
+	// stamps are the files' stats when cert was read.
 	stamps [2]os.FileInfo
 	cert   *tls.Certificate
+	// lastErr is the last problem logged, so a broken pair is logged once, not at every handshake.
+	lastErr string
 }
 
 // LoadCertificate reads the certificate and key files.
@@ -53,24 +55,30 @@ func (c *Certificate) stat() ([2]os.FileInfo, error) {
 	return stamps, nil
 }
 
-// GetCertificate returns the current certificate, read again if a file changed. A certificate that
-// cannot be read is logged and the previous one is served: a renewal written in two steps (the
-// certificate, then the key) is read once both are there.
+// GetCertificate returns the current certificate, read again if a file changed. A pair that cannot
+// be read is logged and the previous certificate is served: a renewal written in two steps (the
+// certificate, then the key) is read once both are there. The pair is tried again at every
+// handshake until it reads, so a transient error does not keep the old certificate.
 func (c *Certificate) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	stamps, err := c.stat()
-	if err != nil || sameStamp(stamps[0], c.stamps[0]) && sameStamp(stamps[1], c.stamps[1]) {
+	if err == nil && sameStamp(stamps[0], c.stamps[0]) && sameStamp(stamps[1], c.stamps[1]) {
 		return c.cert, nil
 	}
-	c.stamps = stamps
-	cert, err := tls.LoadX509KeyPair(c.certFile, c.keyFile)
+	var cert tls.Certificate
+	if err == nil {
+		cert, err = tls.LoadX509KeyPair(c.certFile, c.keyFile)
+	}
 	if err != nil {
-		c.log.Error("cannot read the new TLS certificate; serving the previous one", "cert", c.certFile, "key", c.keyFile, "error", err)
+		if msg := err.Error(); msg != c.lastErr {
+			c.lastErr = msg
+			c.log.Error("cannot read the new TLS certificate; serving the previous one", "cert", c.certFile, "key", c.keyFile, "error", err)
+		}
 		return c.cert, nil
 	}
 	c.log.Info("serving the new TLS certificate", "cert", c.certFile)
-	c.cert = &cert
+	c.stamps, c.cert, c.lastErr = stamps, &cert, ""
 	return c.cert, nil
 }
 

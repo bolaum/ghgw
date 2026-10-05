@@ -52,6 +52,11 @@ users:
   rpi01-agent:
     key_hash: %s
     groups: [agents]
+    grants:
+      - id: 3
+        repos: ["bolaum/pushable"]
+        access: write
+        push: ["agent/**"]
   off-agent:
     key_hash: %s
     disabled: true
@@ -231,15 +236,19 @@ func TestGatewayDenials(t *testing.T) {
 			header:     http.Header{"Authorization": {"Bearer ghp_abc"}},
 			wantStatus: 401, wantBody: "ghgw: unknown ghgw key"},
 		{name: "repository not granted", method: "GET", path: "/acme/secret.git/info/refs?service=git-upload-pack", user: "rpi01-agent",
-			wantStatus: 403, wantBody: "ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*\n"},
+			wantStatus: 403, wantBody: "ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, bolaum/pushable\n"},
 		{name: "repository not granted, service call", method: "POST", path: "/acme/secret.git/git-upload-pack", user: "rpi01-agent",
-			wantStatus: 403, wantBody: "ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*\n"},
+			wantStatus: 403, wantBody: "ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, bolaum/pushable\n"},
 		{name: "disabled user", method: "GET", path: advertisement, user: "off-agent",
 			wantStatus: 403, wantBody: "ghgw: user off-agent is disabled; ask the admin to enable it\n"},
 		{name: "owner without credential", method: "GET", path: "/acme/app.git/info/refs?service=git-upload-pack", user: "acme-agent",
 			wantStatus: 403, wantBody: "ghgw: ghgw has no credential for owner acme; ask the admin to add one\n"},
-		{name: "push", method: "GET", path: "/bolaum/ghgw.git/info/refs?service=git-receive-pack", user: "rpi01-agent",
+		{name: "push", method: "GET", path: "/bolaum/pushable.git/info/refs?service=git-receive-pack", user: "rpi01-agent",
 			wantStatus: 501, wantBody: "ghgw: this gateway does not accept pushes yet"},
+		{name: "push with read-only access", method: "POST", path: "/bolaum/ghgw.git/git-receive-pack", user: "rpi01-agent",
+			wantStatus: 403, wantBody: "ghgw: rpi01-agent has read-only access to bolaum/ghgw; pushing needs a grant with access write\n"},
+		{name: "push by a disabled user", method: "GET", path: "/bolaum/pushable.git/info/refs?service=git-receive-pack", user: "off-agent",
+			wantStatus: 403, wantBody: "ghgw: user off-agent is disabled; ask the admin to enable it\n"},
 		{name: "not git", method: "GET", path: "/bolaum/ghgw.git/HEAD", user: "rpi01-agent",
 			wantStatus: 404, wantBody: "ghgw: not a git repository URL; ghgw serves git at /OWNER/REPO.git\n"},
 		{name: "invalid repository name", method: "GET", path: "/bolaum/x.git.git/info/refs?service=git-upload-pack", user: "rpi01-agent",
@@ -619,5 +628,32 @@ func TestGatewayDoesNotLogUpstreamBytes(t *testing.T) {
 	}
 	if !strings.Contains(logs, "the upstream's answer is not valid HTTP") {
 		t.Errorf("logs = %s, want the failure classified", logs)
+	}
+}
+
+func TestGatewayStoreFailure(t *testing.T) {
+	e := newTestEnv(t)
+	e.store.Close()
+	resp, body := e.do(t, "GET", advertisement, "rpi01-agent", nil, nil)
+	want := "ghgw: the gateway cannot read its store, so every request is denied; try again later, or ask the admin to check the gateway's log\n"
+	if resp.StatusCode != 503 || body != want {
+		t.Errorf("got %d %q, want 503 %q", resp.StatusCode, body, want)
+	}
+	if logs := e.logs.String(); !strings.Contains(logs, "cannot read the owners from the store") {
+		t.Errorf("logs = %s, want the store failure", logs)
+	}
+}
+
+func TestGatewayDoesNotLogPastedKeys(t *testing.T) {
+	e := newTestEnv(t)
+	key, _ := store.NewUserKey()
+	for _, line := range []string{"key_hash: *" + key.Reveal(), "key_hash: " + key.Reveal(), "key_hash: !!int " + key.Reveal()} {
+		writePolicy(t, e.policyPath, "users:\n  a:\n    "+line+"\n")
+		if resp, _ := e.do(t, "GET", advertisement, "rpi01-agent", nil, nil); resp.StatusCode != 503 {
+			t.Errorf("%s: got %d, want 503", line, resp.StatusCode)
+		}
+	}
+	if logs := e.logs.String(); strings.Contains(logs, key.Reveal()[len("ghgw_"):]) {
+		t.Errorf("the log holds the pasted key: %s", logs)
 	}
 }
