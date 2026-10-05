@@ -90,33 +90,36 @@ func loadMasterKey(dir string, given Secret, initialized bool) ([]byte, string, 
 	return key, path, nil
 }
 
-// initAdminToken stores the first admin token when the database has none. The file is written
-// first, so the stored token is always in it. An admin-token file that already exists then is not
-// adopted: it was left by an interrupted first start or by an earlier database, whose token may
-// have been shared, so the admin removes it and gets a new one.
-func (s *Store) initAdminToken(ctx context.Context, dir string) (Secret, error) {
-	var token Secret
+// initAdminToken stores the first admin token when the database has none, and returns the path of
+// the file that holds it then. The file is written first, so the stored token is always in it. An
+// admin-token file that already exists then is not adopted: it was left by an interrupted first
+// start or by an earlier database, whose token may have been shared, so the admin removes it and
+// gets a new one.
+func (s *Store) initAdminToken(ctx context.Context, dir string) (string, error) {
+	var created string
 	err := s.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		found, err := exists(ctx, tx, "SELECT 1 FROM admin_tokens LIMIT 1")
 		if err != nil || found {
 			return err
 		}
 		path := filepath.Join(dir, adminTokenFile)
-		var hash []byte
-		token, hash = newKey(adminTokenPrefix)
+		token, hash := newKey(adminTokenPrefix)
 		switch err := createPrivateFile(path, []byte(token.Reveal()+"\n")); {
 		case errors.Is(err, fs.ErrExist):
 			return fmt.Errorf("admin token file %s exists, but the database has no admin token (an interrupted first start or an earlier database left it); remove it and ghgw creates a new admin token", path)
 		case err != nil:
 			return fmt.Errorf("create the admin token: %w", err)
 		}
-		_, err = tx.ExecContext(ctx, "INSERT INTO admin_tokens (token_hash, created_at) VALUES (?, ?)", hash, time.Now().Unix())
-		return dbErr(err)
+		if _, err := tx.ExecContext(ctx, "INSERT INTO admin_tokens (token_hash, created_at) VALUES (?, ?)", hash, time.Now().Unix()); err != nil {
+			return dbErr(err)
+		}
+		created = path
+		return nil
 	})
 	if err != nil {
-		return Secret{}, err
+		return "", err
 	}
-	return token, nil
+	return created, nil
 }
 
 // AuthenticateAdmin checks an admin token. It returns an ErrUnknownKey error when the token is not
@@ -128,7 +131,7 @@ func (s *Store) AuthenticateAdmin(ctx context.Context, token Secret) error {
 	}
 	var found bool
 	err := s.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		hashes, err := hashesBySelector(ctx, tx, "SELECT token_hash FROM admin_tokens WHERE substr(token_hash, 1, 8) = ?", hash)
+		hashes, err := hashesBySelector(ctx, tx, adminByTokenQuery, hash)
 		found = matchHash(hash, hashes) >= 0
 		return err
 	})

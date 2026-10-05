@@ -50,10 +50,13 @@ func errorf(kind error, format string, args ...any) error {
 }
 
 // dbTimeout bounds every database call, whatever the caller's context allows. SQLite waits up to
-// busyTimeout for a lock held by another connection.
+// busyTimeout for a lock held by another connection. maxConns bounds the connections, so a flood
+// of requests (unknown keys reach the database too) waits for one under its deadline instead of
+// opening a file descriptor and a page cache each.
 const (
 	dbTimeout   = 10 * time.Second
 	busyTimeout = 5 * time.Second
+	maxConns    = 8
 )
 
 // Store is ghgw's state. It is safe for concurrent use.
@@ -75,49 +78,52 @@ type Options struct {
 // current user; it never replaces an existing master key file. The master key must be the one the
 // database was created with.
 //
-// adminToken is the first admin token when this call stored it, for the caller to hand to the
-// admin once; it is zero otherwise. The token is also in the state directory, in admin-token.
-func Open(ctx context.Context, dir string, opts Options) (_ *Store, adminToken Secret, err error) {
+// adminTokenPath is the admin-token file when this call created the first admin token, for the
+// caller to point the admin to; it is empty otherwise. The token itself is only in that file, so
+// it never passes through the caller's output or logs.
+func Open(ctx context.Context, dir string, opts Options) (_ *Store, adminTokenPath string, err error) {
 	if dir == "" {
-		return nil, Secret{}, errors.New("no state directory given")
+		return nil, "", errors.New("no state directory given")
 	}
 	dir, err = filepath.Abs(dir)
 	if err != nil {
-		return nil, Secret{}, err
+		return nil, "", err
 	}
 	if err := prepareDir(dir); err != nil {
-		return nil, Secret{}, err
+		return nil, "", err
 	}
 	dbPath := filepath.Join(dir, dbFile)
 	// SQLite would create the file with mode 0644; created here it is private from the start, and
 	// SQLite gives its side files the same mode.
 	if err := createPrivateFile(dbPath, nil); err != nil && !errors.Is(err, fs.ErrExist) {
-		return nil, Secret{}, fmt.Errorf("create the database: %w", err)
+		return nil, "", fmt.Errorf("create the database: %w", err)
 	}
 	db, err := sql.Open("sqlite", dsn(dbPath))
 	if err != nil {
-		return nil, Secret{}, fmt.Errorf("open the database: %w", err)
+		return nil, "", fmt.Errorf("open the database: %w", err)
 	}
 	defer func() {
 		if err != nil {
 			db.Close()
 		}
 	}()
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns)
 	s := &Store{db: db}
 	if err := s.enableWAL(ctx); err != nil {
-		return nil, Secret{}, err
+		return nil, "", err
 	}
 	if err := s.migrate(ctx); err != nil {
-		return nil, Secret{}, err
+		return nil, "", err
 	}
 	if err := s.initMasterKey(ctx, dir, opts.MasterKey); err != nil {
-		return nil, Secret{}, err
+		return nil, "", err
 	}
-	adminToken, err = s.initAdminToken(ctx, dir)
+	adminTokenPath, err = s.initAdminToken(ctx, dir)
 	if err != nil {
-		return nil, Secret{}, err
+		return nil, "", err
 	}
-	return s, adminToken, nil
+	return s, adminTokenPath, nil
 }
 
 // dsn returns the SQLite URI of the database: mode=rw because Open created the file, foreign keys
@@ -214,7 +220,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 			return fmt.Errorf("read the database version: %w", err)
 		}
-		if version > len(ms) {
+		switch {
+		case version < 0:
+			return fmt.Errorf("the database has schema version %d, which no ghgw writes; restore it from a backup", version)
+		case version > len(ms):
 			return fmt.Errorf("the database has schema version %d, but this ghgw knows only up to %d; run a newer ghgw", version, len(ms))
 		}
 		for i, m := range ms[version:] {
@@ -302,24 +311,10 @@ func affected(res sql.Result, format string, args ...any) error {
 // maxNameLen bounds the user, group and owner names the store takes: no valid name is longer.
 const maxNameLen = 100
 
-var plainNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
-
-// display renders a name the caller gave for a message: as is when it could be a valid name,
-// quoted and cut otherwise, so no message carries control characters or unbounded input.
-func display(name string) string {
-	if plainNameRE.MatchString(name) {
-		return name
-	}
-	if len(name) > maxNameLen {
-		return strconv.Quote(name[:maxNameLen]) + "..."
-	}
-	return strconv.Quote(name)
-}
-
 // checkNameLen rejects a new name longer than any valid one before it reaches the database.
 func checkNameLen(kind, name string) error {
 	if len(name) > maxNameLen {
-		return errorf(ErrInvalid, "%s name %s is longer than %d bytes", kind, display(name), maxNameLen)
+		return errorf(ErrInvalid, "%s name %s is longer than %d bytes", kind, core.Printable(name), maxNameLen)
 	}
 	return nil
 }

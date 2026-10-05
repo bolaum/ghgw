@@ -183,7 +183,8 @@ func TestCredentialTampering(t *testing.T) {
 }
 
 // TestNoPlaintextSecretsInDatabase checks every database file, while the store is open (the WAL
-// holds the latest writes) and after it is closed, for every secret and its hex body.
+// holds the latest writes) and after it is closed, for every secret and its hex body, and for the
+// master key in base64 and in bytes.
 func TestNoPlaintextSecretsInDatabase(t *testing.T) {
 	ctx := context.Background()
 	s, dir, admin := openStore(t)
@@ -228,6 +229,14 @@ func TestNoPlaintextSecretsInDatabase(t *testing.T) {
 		needles[name+" body"] = body
 		needles[name+" body prefix"] = body[:16]
 	}
+
+	masterKey := strings.TrimSpace(string(readFile(t, filepath.Join(dir, masterKeyFile))))
+	rawMasterKey, err := parseMasterKey(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	needles["master key"] = masterKey
+	needles["master key bytes"] = string(rawMasterKey)
 
 	scan := func(when string) {
 		t.Helper()

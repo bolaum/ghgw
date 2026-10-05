@@ -9,11 +9,6 @@ import (
 	"github.com/bolaum/ghgw/internal/core"
 )
 
-// MaxGrantPatterns bounds the repository patterns and the push patterns of a grant, so the stored
-// policy (and every decision built from it) stays small whatever the admin sends. core bounds the
-// length of each pattern.
-const MaxGrantPatterns = 100
-
 // CreateUser creates an enabled user and returns its ghgw key. The key is not stored, only its
 // hash: this is the only time it is available.
 func (s *Store) CreateUser(ctx context.Context, name string) (Secret, error) {
@@ -22,7 +17,7 @@ func (s *Store) CreateUser(ctx context.Context, name string) (Secret, error) {
 	}
 	key, hash := newKey(userKeyPrefix)
 	err := s.change(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		if err := mustNotExist(ctx, tx, "SELECT 1 FROM users WHERE name = ?", name, "user %s already exists", display(name)); err != nil {
+		if err := mustNotExist(ctx, tx, "SELECT 1 FROM users WHERE name = ?", name, "user %s already exists", core.Printable(name)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, "INSERT INTO users (name, key_hash) VALUES (?, ?)", name, hash)
@@ -42,7 +37,7 @@ func (s *Store) RotateUserKey(ctx context.Context, name string) (Secret, error) 
 		if err != nil {
 			return dbErr(err)
 		}
-		return affected(res, "user %s does not exist", display(name))
+		return affected(res, "user %s does not exist", core.Printable(name))
 	})
 	if err != nil {
 		return Secret{}, err
@@ -57,7 +52,7 @@ func (s *Store) SetUserDisabled(ctx context.Context, name string, disabled bool)
 		if err != nil {
 			return dbErr(err)
 		}
-		return affected(res, "user %s does not exist", display(name))
+		return affected(res, "user %s does not exist", core.Printable(name))
 	})
 }
 
@@ -68,7 +63,7 @@ func (s *Store) DeleteUser(ctx context.Context, name string) error {
 		if err != nil {
 			return dbErr(err)
 		}
-		return affected(res, "user %s does not exist", display(name))
+		return affected(res, "user %s does not exist", core.Printable(name))
 	})
 }
 
@@ -84,7 +79,7 @@ func (s *Store) AuthenticateUser(ctx context.Context, key Secret) (core.User, er
 		hashes [][]byte
 	)
 	err := s.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, "SELECT name, disabled, key_hash FROM users WHERE substr(key_hash, 1, 8) = ?", selector(hash))
+		rows, err := tx.QueryContext(ctx, userByKeyQuery, selector(hash))
 		if err != nil {
 			return dbErr(err)
 		}
@@ -117,7 +112,7 @@ func (s *Store) CreateGroup(ctx context.Context, name string) error {
 		return err
 	}
 	return s.change(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		if err := mustNotExist(ctx, tx, "SELECT 1 FROM groups WHERE name = ?", name, "group %s already exists", display(name)); err != nil {
+		if err := mustNotExist(ctx, tx, "SELECT 1 FROM groups WHERE name = ?", name, "group %s already exists", core.Printable(name)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, "INSERT INTO groups (name) VALUES (?)", name)
@@ -132,17 +127,17 @@ func (s *Store) DeleteGroup(ctx context.Context, name string) error {
 		if err != nil {
 			return dbErr(err)
 		}
-		return affected(res, "group %s does not exist", display(name))
+		return affected(res, "group %s does not exist", core.Printable(name))
 	})
 }
 
 // AddMember adds a user to a group. Adding a member twice is not an error.
 func (s *Store) AddMember(ctx context.Context, group, user string) error {
 	return s.change(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		if err := mustExist(ctx, tx, "SELECT 1 FROM groups WHERE name = ?", group, "group %s does not exist", display(group)); err != nil {
+		if err := mustExist(ctx, tx, "SELECT 1 FROM groups WHERE name = ?", group, "group %s does not exist", core.Printable(group)); err != nil {
 			return err
 		}
-		if err := mustExist(ctx, tx, "SELECT 1 FROM users WHERE name = ?", user, "user %s does not exist", display(user)); err != nil {
+		if err := mustExist(ctx, tx, "SELECT 1 FROM users WHERE name = ?", user, "user %s does not exist", core.Printable(user)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO group_members (group_name, user_name) VALUES (?, ?)", group, user)
@@ -157,7 +152,7 @@ func (s *Store) RemoveMember(ctx context.Context, group, user string) error {
 		if err != nil {
 			return dbErr(err)
 		}
-		return affected(res, "user %s is not a member of group %s", display(user), display(group))
+		return affected(res, "user %s is not a member of group %s", core.Printable(user), core.Printable(group))
 	})
 }
 
@@ -205,10 +200,11 @@ func (s *Store) AddGrant(ctx context.Context, g core.Grant) (int, error) {
 	return id, nil
 }
 
-// patterns encodes a grant's patterns as a JSON array, within the limit.
+// patterns encodes a grant's patterns as a JSON array. core checks the limit too, but only after
+// the insert: checked here, an oversized grant never reaches the database.
 func patterns[P fmt.Stringer](kind string, ps []P) (string, error) {
-	if len(ps) > MaxGrantPatterns {
-		return "", errorf(ErrInvalid, "a grant has at most %d %s patterns, not %d", MaxGrantPatterns, kind, len(ps))
+	if len(ps) > core.MaxGrantPatterns {
+		return "", errorf(ErrInvalid, "a grant has at most %d %s patterns, not %d", core.MaxGrantPatterns, kind, len(ps))
 	}
 	texts := make([]string, len(ps))
 	for i, p := range ps {
@@ -326,10 +322,15 @@ func scanGrant(rows *sql.Rows) (core.Grant, error) {
 	return g, nil
 }
 
+// parsePatterns decodes a JSON array of patterns stored by AddGrant. An array over the limit is
+// refused before its patterns are parsed.
 func parsePatterns[P any](text string, parse func(string) (P, error)) ([]P, error) {
 	var texts []string
 	if err := json.Unmarshal([]byte(text), &texts); err != nil {
 		return nil, err
+	}
+	if len(texts) > core.MaxGrantPatterns {
+		return nil, fmt.Errorf("has %d patterns; a grant has at most %d", len(texts), core.MaxGrantPatterns)
 	}
 	ps := make([]P, len(texts))
 	for i, t := range texts {

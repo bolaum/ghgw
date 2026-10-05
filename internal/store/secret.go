@@ -82,6 +82,13 @@ const selectorBytes = 8
 
 func selector(hash []byte) []byte { return hash[:selectorBytes] }
 
+// The lookups by selector. Each must use its expression index (users_key_selector and
+// admin_tokens_selector), or every unknown key would scan the whole table; a test checks the plans.
+const (
+	userByKeyQuery    = "SELECT name, disabled, key_hash FROM users WHERE substr(key_hash, 1, 8) = ?"
+	adminByTokenQuery = "SELECT token_hash FROM admin_tokens WHERE substr(token_hash, 1, 8) = ?"
+)
+
 // matchHash returns the index of the stored hash equal to hash, or -1. It compares in constant
 // time and looks at every candidate.
 func matchHash(hash []byte, stored [][]byte) int {

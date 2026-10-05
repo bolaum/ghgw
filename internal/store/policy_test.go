@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -238,14 +240,14 @@ func TestChangeErrors(t *testing.T) {
 		{
 			name: "too many repository patterns",
 			change: func() error {
-				return addGrant(grant(user, func(g *core.Grant) { g.Repos = slices.Repeat(g.Repos, MaxGrantPatterns+1) }))
+				return addGrant(grant(user, func(g *core.Grant) { g.Repos = slices.Repeat(g.Repos, core.MaxGrantPatterns+1) }))
 			},
 			kind: ErrInvalid, want: "at most 100 repository patterns, not 101",
 		},
 		{
 			name: "too many push patterns",
 			change: func() error {
-				return addGrant(grant(user, func(g *core.Grant) { g.Push = slices.Repeat(g.Push, MaxGrantPatterns+1) }))
+				return addGrant(grant(user, func(g *core.Grant) { g.Push = slices.Repeat(g.Push, core.MaxGrantPatterns+1) }))
 			},
 			kind: ErrInvalid, want: "at most 100 push patterns",
 		},
@@ -358,10 +360,52 @@ func TestHostileNamesInErrors(t *testing.T) {
 				continue
 			}
 			msg := err.Error()
-			// core renders an identifier within 1 KiB; the store cuts names at 100 bytes.
-			if strings.ContainsAny(msg, "\n\x1b\u202e") || len(msg) > 1024+200 {
+			// core.Printable renders each name within 1 KiB; a message names at most two.
+			if strings.ContainsAny(msg, "\n\x1b\u202e") || len(msg) > 2*1024+200 {
 				t.Errorf("%s: the error renders the name unsafely: %.200q", tt.name, msg)
 			}
 		}
 	}
+}
+
+// TestStoredGrantPatternLimit writes grants straight into the database: loading enforces the
+// pattern limit that AddGrant enforces.
+func TestStoredGrantPatternLimit(t *testing.T) {
+	tests := []struct {
+		name, repos, push string
+		want              string
+	}{
+		{name: "at the limit", repos: patternArray("acme/r", core.MaxGrantPatterns), push: patternArray("agent/b", core.MaxGrantPatterns)},
+		{name: "repository patterns", repos: patternArray("acme/r", core.MaxGrantPatterns+1), push: "[]", want: "grant 1 of user agent: has 101 patterns; a grant has at most 100"},
+		{name: "push patterns", repos: `["acme/app"]`, push: patternArray("agent/b", core.MaxGrantPatterns+1), want: "grant 1 of user agent: has 101 patterns; a grant has at most 100"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, _, _ := openStore(t)
+			if _, err := s.CreateUser(ctx, "agent"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec("INSERT INTO grants (user_name, repos, access, push, api) VALUES ('agent', ?, 'write', ?, '')", tt.repos, tt.push); err != nil {
+				t.Fatal(err)
+			}
+			st, err := s.State(ctx)
+			if tt.want == "" {
+				if err != nil || len(st.Grants) != 1 {
+					t.Errorf("State() = %d grants, %v; want the grant", len(st.Grants), err)
+				}
+				return
+			}
+			wantErr(t, err, nil, tt.want)
+		})
+	}
+}
+
+// patternArray returns n patterns prefix0, prefix1, ... as a JSON array.
+func patternArray(prefix string, n int) string {
+	ps := make([]string, n)
+	for i := range ps {
+		ps[i] = fmt.Sprintf("%q", prefix+strconv.Itoa(i))
+	}
+	return "[" + strings.Join(ps, ",") + "]"
 }

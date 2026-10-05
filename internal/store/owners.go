@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bolaum/ghgw/internal/core"
 )
 
 // MaxTokenLen bounds a GitHub credential. GitHub's tokens are far shorter; the bound only keeps
@@ -32,7 +34,7 @@ func (s *Store) AddOwner(ctx context.Context, name string, token Secret, expires
 	}
 	return s.change(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := mustNotExist(ctx, tx, "SELECT 1 FROM owners WHERE name = ?", name,
-			"owner %s already has a credential; rotate it instead", display(name)); err != nil {
+			"owner %s already has a credential; rotate it instead", core.Printable(name)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, "INSERT INTO owners (name, credential, expires_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -51,7 +53,7 @@ func (s *Store) RotateOwner(ctx context.Context, name string, token Secret, expi
 		var stored string
 		err := tx.QueryRowContext(ctx, "SELECT name FROM owners WHERE name = ?", name).Scan(&stored)
 		if errors.Is(err, sql.ErrNoRows) {
-			return errorf(ErrNotFound, "owner %s has no credential; add it first", display(name))
+			return errorf(ErrNotFound, "owner %s has no credential; add it first", core.Printable(name))
 		}
 		if err != nil {
 			return dbErr(err)
@@ -69,7 +71,7 @@ func (s *Store) DeleteOwner(ctx context.Context, name string) error {
 		if err != nil {
 			return dbErr(err)
 		}
-		return affected(res, "owner %s has no credential", display(name))
+		return affected(res, "owner %s has no credential", core.Printable(name))
 	})
 }
 
@@ -107,7 +109,7 @@ func (s *Store) Credential(ctx context.Context, owner string) (Secret, error) {
 	err := s.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, "SELECT name, credential FROM owners WHERE name = ?", owner).Scan(&name, &sealed)
 		if errors.Is(err, sql.ErrNoRows) {
-			return errorf(ErrNotFound, "ghgw has no credential for owner %s", display(owner))
+			return errorf(ErrNotFound, "ghgw has no credential for owner %s", core.Printable(owner))
 		}
 		return dbErr(err)
 	})

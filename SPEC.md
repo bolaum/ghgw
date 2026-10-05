@@ -333,13 +333,13 @@ ghgw: rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, acm
 
 ### 9.1 Admin API
 
-JSON over HTTPS on the admin listener, `/admin/v1/...`, authenticated with an admin token
-(`ghgwa_` and 64 lowercase hex characters, stored hashed like user keys). On first start (no
-admin token in the database) `ghgw serve` creates one, writes it to `admin-token` in the state
-directory (mode 0600), stores its hash and prints it once. If `admin-token` already exists then (left
-by an interrupted first start or an earlier database), it refuses to start rather than revive a
-token that may have been shared: the admin removes the file. All admin clients (CLI now; MCP server and web UI later) use
-`pkg/adminclient`.
+JSON over HTTPS on the admin listener, `/admin/v1/...`, authenticated with an admin token (`ghgwa_`
+and 64 lowercase hex characters, stored hashed like user keys). On first start (no admin token in
+the database) `ghgw serve` creates one, writes it to `admin-token` in the state directory (mode
+0600), stores its hash and prints the file's path, never the token: stdout ends up in logs. If
+`admin-token` already exists then (left by an interrupted first start or an earlier database), it
+refuses to start rather than revive a token that may have been shared: the admin removes the file.
+All admin clients (CLI now; MCP server and web UI later) use `pkg/adminclient`.
 
 Resources (JSON; lists are paginated with `?cursor=`; errors are `{"error": {"code", "message"}}`):
 
@@ -462,7 +462,7 @@ logged with `slog` to stdout. Secrets are never logged.
   point them at a fake GitHub (`httptest`).
 - SQLite migrations are embedded SQL files (`NNNN_name.sql`, numbered from 1 without gaps) applied
   in order at startup, in one transaction; `PRAGMA user_version` records how many are applied, and
-  a database from a newer ghgw is refused.
+  a database from a newer ghgw, or with a negative version, is refused.
 
 ## 16. v0 milestones
 

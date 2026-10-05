@@ -3,42 +3,60 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// openStore opens a store in a new state directory and closes it at the end of the test.
+// openStore opens a store in a new state directory and closes it at the end of the test. It
+// returns the first admin token, read from the file Open wrote it to.
 func openStore(t *testing.T) (s *Store, dir string, adminToken Secret) {
 	t.Helper()
 	dir = filepath.Join(t.TempDir(), "state")
-	s, adminToken, err := Open(context.Background(), dir, Options{})
+	s, tokenPath, err := Open(context.Background(), dir, Options{})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return s, dir, adminToken
+	if want := filepath.Join(dir, adminTokenFile); tokenPath != want {
+		t.Fatalf("first Open() admin token path = %q, want %q", tokenPath, want)
+	}
+	return s, dir, readAdminToken(t, dir)
+}
+
+// readAdminToken returns the token in the admin-token file of dir, which ends in a newline.
+func readAdminToken(t *testing.T, dir string) Secret {
+	t.Helper()
+	token, ok := strings.CutSuffix(string(readFile(t, filepath.Join(dir, adminTokenFile))), "\n")
+	if !ok {
+		t.Fatal("admin-token does not end in a newline")
+	}
+	return NewSecret(token)
 }
 
 // reopen opens the store in dir again, after a first Open.
-func reopen(t *testing.T, dir string, opts Options) (*Store, Secret, error) {
+func reopen(t *testing.T, dir string, opts Options) (*Store, string, error) {
 	t.Helper()
-	s, token, err := Open(context.Background(), dir, opts)
+	s, tokenPath, err := Open(context.Background(), dir, opts)
 	if err == nil {
 		t.Cleanup(func() { s.Close() })
 	}
-	return s, token, err
+	return s, tokenPath, err
 }
 
 func TestOpenFirstStart(t *testing.T) {
 	ctx := context.Background()
 	s, dir, token := openStore(t)
-	if token.IsZero() {
-		t.Fatal("first Open returned no admin token")
+	if _, ok := hashKey(adminTokenPrefix, token); !ok {
+		t.Fatal("admin-token does not hold a well-formed admin token")
 	}
 	if err := s.AuthenticateAdmin(ctx, token); err != nil {
 		t.Errorf("AuthenticateAdmin(first token) error = %v", err)
@@ -62,13 +80,6 @@ func TestOpenFirstStart(t *testing.T) {
 		if perm := fi.Mode().Perm(); !fi.Mode().IsRegular() || perm != 0o600 {
 			t.Errorf("%s: mode = %v, want a regular file with mode 0600", name, fi.Mode())
 		}
-	}
-	file, err := os.ReadFile(filepath.Join(dir, adminTokenFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(file) != token.Reveal()+"\n" {
-		t.Error("admin-token does not hold the token Open returned")
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -94,12 +105,12 @@ func TestOpenAgain(t *testing.T) {
 	masterKey := readFile(t, filepath.Join(dir, masterKeyFile))
 	s.Close()
 
-	s2, token2, err := reopen(t, dir, Options{})
+	s2, tokenPath, err := reopen(t, dir, Options{})
 	if err != nil {
 		t.Fatalf("second Open() error = %v", err)
 	}
-	if !token2.IsZero() {
-		t.Error("second Open returned an admin token; only the first start creates one")
+	if tokenPath != "" {
+		t.Error("second Open returned an admin token path; only the first start creates a token")
 	}
 	if !bytes.Equal(readFile(t, filepath.Join(dir, masterKeyFile)), masterKey) {
 		t.Error("second Open changed the master key file")
@@ -142,11 +153,6 @@ func TestOpenRefusesUnsafeState(t *testing.T) {
 			want:  "<dir>/admin-token is accessible by group or others",
 		},
 		{
-			name:  "database readable by others",
-			setup: func(t *testing.T, dir string) { chmod(t, filepath.Join(dir, dbFile), 0o644) },
-			want:  "<dir>/ghgw.db is accessible by group or others",
-		},
-		{
 			name: "master key is a symbolic link",
 			setup: func(t *testing.T, dir string) {
 				path := filepath.Join(dir, masterKeyFile)
@@ -181,6 +187,51 @@ func TestOpenRefusesUnsafeState(t *testing.T) {
 			tt.setup(t, dir)
 			_, _, err := reopen(t, dir, Options{})
 			wantErr(t, err, nil, strings.ReplaceAll(tt.want, "<dir>", dir))
+		})
+	}
+}
+
+// TestOpenRefusesUnsafeDatabaseFiles plants a symbolic link or a file open to the group at each
+// of SQLite's files: Open refuses it before SQLite opens anything, so neither the planted file nor
+// a link's target changes.
+func TestOpenRefusesUnsafeDatabaseFiles(t *testing.T) {
+	for _, name := range []string{dbFile, dbFile + "-wal", dbFile + "-shm", dbFile + "-journal"} {
+		t.Run(name+" is a symbolic link", func(t *testing.T) {
+			s, dir, _ := openStore(t)
+			s.Close()
+			path := filepath.Join(dir, name)
+			target := filepath.Join(t.TempDir(), name)
+			if name == dbFile {
+				if err := os.Rename(path, target); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writePrivate(t, target, "planted")
+			}
+			content := readFile(t, target)
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := reopen(t, dir, Options{})
+			wantErr(t, err, nil, path+" is a symbolic link; ghgw refuses to follow links in its state")
+			if !bytes.Equal(readFile(t, target), content) {
+				t.Error("Open changed the link's target")
+			}
+		})
+		t.Run(name+" is readable by the group", func(t *testing.T) {
+			s, dir, _ := openStore(t)
+			s.Close()
+			path := filepath.Join(dir, name)
+			if name != dbFile {
+				writePrivate(t, path, "planted")
+			}
+			chmod(t, path, 0o640)
+			content := readFile(t, path)
+			_, _, err := reopen(t, dir, Options{})
+			wantErr(t, err, nil, path+" is accessible by group or others (mode 0640); run chmod 600 "+path)
+			if !bytes.Equal(readFile(t, path), content) {
+				t.Error("Open changed the file")
+			}
 		})
 	}
 }
@@ -363,11 +414,11 @@ func TestLeftoverAdminTokenFile(t *testing.T) {
 	}
 
 	remove(t, filepath.Join(dir, adminTokenFile))
-	s, newToken, err := reopen(t, dir, Options{})
+	s, tokenPath, err := reopen(t, dir, Options{})
 	if err != nil {
 		t.Fatalf("Open() after removing the file error = %v", err)
 	}
-	if newToken.IsZero() || newToken.Reveal() == token.Reveal() {
+	if tokenPath == "" || readAdminToken(t, dir).Reveal() == token.Reveal() {
 		t.Error("Open did not create a new admin token")
 	}
 	if err := s.AuthenticateAdmin(context.Background(), token); !errors.Is(err, ErrUnknownKey) {
@@ -432,13 +483,48 @@ func TestMigrations(t *testing.T) {
 		t.Fatal("no migration embedded")
 	}
 
-	s, dir, _ := openStore(t)
-	if _, err := s.db.Exec("PRAGMA user_version = 999"); err != nil {
+	tests := []struct {
+		version int
+		want    string
+	}{
+		{version: 999, want: "the database has schema version 999, but this ghgw knows only up to"},
+		{version: -1, want: "the database has schema version -1, which no ghgw writes; restore it from a backup"},
+	}
+	for _, tt := range tests {
+		t.Run(strconv.Itoa(tt.version), func(t *testing.T) {
+			s, dir, _ := openStore(t)
+			if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", tt.version)); err != nil {
+				t.Fatal(err)
+			}
+			before := schema(t, s.db)
+			s.Close()
+			_, _, err = reopen(t, dir, Options{})
+			wantErr(t, err, nil, tt.want)
+
+			db, err := sql.Open("sqlite", dsn(filepath.Join(dir, dbFile)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var version int
+			if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != tt.version {
+				t.Errorf("user_version = %d (error %v), want it left at %d", version, err, tt.version)
+			}
+			if after := schema(t, db); after != before {
+				t.Errorf("the refused Open changed the schema:\n%s\nwant:\n%s", after, before)
+			}
+		})
+	}
+}
+
+// schema returns the database's schema as SQL.
+func schema(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var text string
+	if err := db.QueryRow("SELECT group_concat(sql, ';\n') FROM (SELECT sql FROM sqlite_schema ORDER BY name)").Scan(&text); err != nil {
 		t.Fatal(err)
 	}
-	s.Close()
-	_, _, err = reopen(t, dir, Options{})
-	wantErr(t, err, nil, "the database has schema version 999, but this ghgw knows only up to")
+	return text
 }
 
 func TestContextIsHonored(t *testing.T) {
@@ -465,36 +551,37 @@ func TestConcurrentFirstStart(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	const n = 8
 	stores := make([]*Store, n)
-	tokens := make([]Secret, n)
+	tokenPaths := make([]string, n)
 	errs := make([]error, n)
 	done := make(chan struct{})
 	for i := range n {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			stores[i], tokens[i], errs[i] = Open(ctx, dir, Options{})
+			stores[i], tokenPaths[i], errs[i] = Open(ctx, dir, Options{})
 		}()
 	}
 	for range n {
 		<-done
 	}
-	var created []Secret
+	var created int
 	for i := range n {
 		if errs[i] != nil {
 			t.Fatalf("Open() error = %v", errs[i])
 		}
 		t.Cleanup(func() { stores[i].Close() })
-		if !tokens[i].IsZero() {
-			created = append(created, tokens[i])
+		if tokenPaths[i] != "" {
+			created++
 		}
 	}
-	if len(created) != 1 {
-		t.Fatalf("%d Opens returned an admin token, want exactly 1", len(created))
+	if created != 1 {
+		t.Fatalf("%d Opens created an admin token, want exactly 1", created)
 	}
+	token := readAdminToken(t, dir)
 	if err := stores[0].AddOwner(ctx, "acme", NewSecret("github_pat_concurrent"), timeZero); err != nil {
 		t.Fatal(err)
 	}
 	for i, s := range stores {
-		if err := s.AuthenticateAdmin(ctx, created[0]); err != nil {
+		if err := s.AuthenticateAdmin(ctx, token); err != nil {
 			t.Errorf("store %d: AuthenticateAdmin() error = %v", i, err)
 		}
 		if got, err := s.Credential(ctx, "acme"); err != nil || got.Reveal() != "github_pat_concurrent" {
@@ -503,23 +590,119 @@ func TestConcurrentFirstStart(t *testing.T) {
 	}
 }
 
-func TestDisplay(t *testing.T) {
-	tests := []struct {
-		name, want string
-	}{
-		{name: "agent", want: "agent"},
-		{name: "Acme-1.x_y", want: "Acme-1.x_y"},
-		{name: "", want: `""`},
-		{name: "a b", want: `"a b"`},
-		{name: "a\nuser x is allowed", want: `"a\nuser x is allowed"`},
-		{name: "evil\x1b[2J", want: `"evil\x1b[2J"`},
-		{name: "agent\u202eevil", want: `"agent\u202eevil"`},
-		{name: "\xff", want: `"\xff"`},
-		{name: strings.Repeat("a", 101), want: `"` + strings.Repeat("a", 100) + `"...`},
-	}
-	for _, tt := range tests {
-		if got := display(tt.name); got != tt.want {
-			t.Errorf("display(%q) = %s, want %s", tt.name, got, tt.want)
+// The environment of a child process of TestCrossProcessFirstStart: the state directory to open
+// and the child's index.
+const (
+	childDirEnv   = "GHGW_TEST_FIRST_START_DIR"
+	childIndexEnv = "GHGW_TEST_FIRST_START_INDEX"
+	childCount    = 4
+)
+
+func TestMain(m *testing.M) {
+	if dir := os.Getenv(childDirEnv); dir != "" {
+		if err := firstStartChild(dir, os.Getenv(childIndexEnv)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// firstStartChild opens the store in dir once the start file next to dir exists, adds its own
+// owner, and then opens every child's credential and authenticates the admin token. It prints
+// whether its Open created the admin token.
+func firstStartChild(dir, index string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	wait := func(done func() (bool, error)) error {
+		for {
+			if ok, err := done(); ok || err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	err := wait(func() (bool, error) {
+		_, err := os.Stat(filepath.Join(filepath.Dir(dir), "start"))
+		return err == nil, nil
+	})
+	if err != nil {
+		return err
+	}
+	s, tokenPath, err := Open(ctx, dir, Options{})
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if err := s.AddOwner(ctx, "owner"+index, NewSecret("github_pat_child"+index), timeZero); err != nil {
+		return err
+	}
+	for i := range childCount {
+		err := wait(func() (bool, error) {
+			token, err := s.Credential(ctx, fmt.Sprintf("owner%d", i))
+			switch {
+			case errors.Is(err, ErrNotFound):
+				return false, nil
+			case err != nil:
+				return false, err
+			case token.Reveal() != fmt.Sprintf("github_pat_child%d", i):
+				return false, fmt.Errorf("the credential of owner%d differs", i)
+			}
+			return true, nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	data, err := readPrivateFile(filepath.Join(dir, adminTokenFile))
+	if err != nil {
+		return err
+	}
+	if err := s.AuthenticateAdmin(ctx, NewSecret(strings.TrimSuffix(string(data), "\n"))); err != nil {
+		return err
+	}
+	fmt.Println("created admin token:", tokenPath != "")
+	return nil
+}
+
+// TestCrossProcessFirstStart starts several processes on one new state directory at once: one
+// creates the admin token, and every one authenticates it and opens the credentials the others
+// sealed, so they all use one master key.
+func TestCrossProcessFirstStart(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "state")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmds := make([]*exec.Cmd, childCount)
+	outs := make([]bytes.Buffer, childCount)
+	for i := range childCount {
+		cmds[i] = exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
+		cmds[i].Env = append(os.Environ(), childDirEnv+"="+dir, childIndexEnv+"="+strconv.Itoa(i))
+		cmds[i].Stdout, cmds[i].Stderr = &outs[i], &outs[i]
+		if err := cmds[i].Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePrivate(t, filepath.Join(root, "start"), "")
+	created := 0
+	for i, cmd := range cmds {
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("child %d: %v\n%s", i, err, outs[i].String())
+			continue
+		}
+		if strings.Contains(outs[i].String(), "created admin token: true") {
+			created++
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	if created != 1 {
+		t.Errorf("%d processes created an admin token, want exactly 1", created)
 	}
 }

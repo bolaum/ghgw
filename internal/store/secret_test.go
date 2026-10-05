@@ -99,6 +99,8 @@ func TestHashKeyRejectsMalformed(t *testing.T) {
 
 func TestMatchHash(t *testing.T) {
 	a, b := sha256.Sum256([]byte("a")), sha256.Sum256([]byte("b"))
+	sameSelector := a
+	sameSelector[len(sameSelector)-1] ^= 1
 	tests := []struct {
 		name   string
 		stored [][]byte
@@ -106,8 +108,9 @@ func TestMatchHash(t *testing.T) {
 	}{
 		{name: "no candidate", want: -1},
 		{name: "match", stored: [][]byte{a[:]}, want: 0},
-		{name: "same selector, other hash", stored: [][]byte{b[:]}, want: -1},
-		{name: "second candidate", stored: [][]byte{b[:], a[:]}, want: 1},
+		{name: "other hash", stored: [][]byte{b[:]}, want: -1},
+		{name: "same selector, other hash", stored: [][]byte{sameSelector[:]}, want: -1},
+		{name: "second candidate", stored: [][]byte{sameSelector[:], a[:]}, want: 1},
 		{name: "truncated stored hash", stored: [][]byte{a[:16]}, want: -1},
 	}
 	for _, tt := range tests {
