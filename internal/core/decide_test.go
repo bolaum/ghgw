@@ -802,6 +802,66 @@ func TestDecideREST(t *testing.T) {
 		})
 	})
 
+	t.Run("hard rules cover a misclassified entry of each added family path", func(t *testing.T) {
+		const repo = "/repos/{owner}/{repo}"
+		tests := []struct {
+			op   RESTOperation // misclassified in a preset
+			want Class
+		}{
+			{RESTOperation{"pulls.merge-async", "PUT", repo + "/pulls/{pull_number}/merge-async", ClassPR}, ClassMerge},
+			{RESTOperation{"code-scanning.commit-autofix", "POST", repo + "/code-scanning/alerts/{alert_number}/autofix/commits", ClassPR}, ClassCodeChange},
+			{RESTOperation{"migrations.start-import", "PUT", repo + "/import", ClassPR}, ClassCodeChange},
+			{RESTOperation{"migrations.map-commit-author", "PATCH", repo + "/import/authors/{author_id}", ClassPR}, ClassCodeChange},
+			{RESTOperation{"repos.create-attestation", "POST", repo + "/attestations", ClassPR}, ClassCIResult},
+			{RESTOperation{"code-scanning.upload-sarif", "POST", repo + "/code-scanning/sarifs", ClassPR}, ClassCIResult},
+			{RESTOperation{"dependency-graph.create-repository-snapshot", "POST", repo + "/dependency-graph/snapshots", ClassPR}, ClassCIResult},
+			{RESTOperation{"actions.approve-workflow-run", "POST", repo + "/actions/runs/{run_id}/approve", ClassPR}, ClassTrigger},
+			{RESTOperation{"actions.review-pending-deployments-for-run", "POST", repo + "/actions/runs/{run_id}/pending_deployments", ClassPR}, ClassTrigger},
+			{RESTOperation{"actions.review-custom-gates-for-run", "POST", repo + "/actions/runs/{run_id}/deployment_protection_rule", ClassPR}, ClassTrigger},
+			{RESTOperation{"codespaces.create-with-repo-for-authenticated-user", "POST", repo + "/codespaces", ClassPR}, ClassTrigger},
+			{RESTOperation{"codespaces.create-with-pr-for-authenticated-user", "POST", repo + "/pulls/{pull_number}/codespaces", ClassPR}, ClassTrigger},
+			{RESTOperation{"agents.list-repo-secrets", "GET", repo + "/agents/secrets", ClassRead}, ClassAdmin},
+			{RESTOperation{"agents.create-or-update-repo-secret", "PUT", repo + "/agents/secrets/{secret_name}", ClassPR}, ClassAdmin},
+			{RESTOperation{"agents.create-repo-variable", "POST", repo + "/agents/variables", ClassPR}, ClassAdmin},
+			{RESTOperation{"agents.list-repo-organization-secrets", "GET", repo + "/agents/organization-secrets", ClassRead}, ClassAdmin},
+			{RESTOperation{"agents.list-repo-organization-variables", "GET", repo + "/agents/organization-variables", ClassRead}, ClassAdmin},
+			{RESTOperation{"actions.update-repo-actions-policy", "PUT", repo + "/actions/policies/{policy_id}", ClassPR}, ClassAdmin},
+			{RESTOperation{"secret-scanning.get-alert", "GET", repo + "/secret-scanning/alerts/{alert_number}", ClassRead}, ClassAdmin},
+			{RESTOperation{"secret-scanning.update-alert", "PATCH", repo + "/secret-scanning/alerts/{alert_number}", ClassPR}, ClassAdmin},
+			{RESTOperation{"actions.enable-workflow", "PUT", repo + "/actions/workflows/{workflow_id}/enable", ClassPR}, ClassAdmin},
+			{RESTOperation{"actions.disable-workflow", "PUT", repo + "/actions/workflows/{workflow_id}/disable", ClassPR}, ClassAdmin},
+			{RESTOperation{"interactions.set-restrictions-for-repo", "PUT", repo + "/interaction-limits", ClassPR}, ClassAdmin},
+			{RESTOperation{"repos.disable-immutable-releases", "DELETE", repo + "/immutable-releases", ClassPR}, ClassAdmin},
+			{RESTOperation{"repos.custom-properties-for-repos-create-or-update-repository-values", "PATCH", repo + "/properties/values", ClassPR}, ClassAdmin},
+			{RESTOperation{"code-scanning.update-alert", "PATCH", repo + "/code-scanning/alerts/{alert_number}", ClassPR}, ClassAdmin},
+			{RESTOperation{"code-quality.update-setup", "PATCH", repo + "/code-quality/setup", ClassPR}, ClassAdmin},
+			{RESTOperation{"dependabot.update-alert", "PATCH", repo + "/dependabot/alerts/{alert_number}", ClassPR}, ClassAdmin},
+			{RESTOperation{"security-advisories.create-repository-advisory", "POST", repo + "/security-advisories", ClassPR}, ClassAdmin},
+		}
+		// Built by hand: NewRESTTable rejects every one of these entries.
+		table := &RESTTable{byName: map[string]RESTOperation{}}
+		var decideTests []decideTest
+		for _, tt := range tests {
+			if _, err := NewRESTTable([]RESTOperation{tt.op}); err == nil {
+				t.Errorf("NewRESTTable() accepted %s as %s", tt.op.Name, tt.op.Class)
+			}
+			table.byName[tt.op.Name] = tt.op
+			decideTests = append(decideTests, decideTest{
+				name: tt.op.Name, user: "a", repo: "bolaum/x", op: REST{Name: tt.op.Name},
+				want: result{Reason: tt.op.Name + " is not allowed: " + hardRules[tt.want]},
+			})
+		}
+		p, err := NewPolicy(State{
+			Users:  []User{{Name: "a"}},
+			Grants: []Grant{grant(t, 1, "user a", []string{"bolaum/*"}, AccessWrite, []string{"**"}, PresetPR)},
+			Owners: []string{"bolaum"},
+		}, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runDecideTests(t, p, decideTests)
+	})
+
 	t.Run("no table", func(t *testing.T) {
 		p, err := NewPolicy(State{
 			Users:  []User{{Name: "a"}},
