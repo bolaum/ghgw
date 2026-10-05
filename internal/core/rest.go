@@ -191,6 +191,12 @@ func hardRuleClasses(method, path string) []Class {
 	if rest != "" {
 		segs = strings.Split(rest[1:], "/")
 	}
+	return familyClasses(method, segs)
+}
+
+// familyClasses returns every hard rule whose family method and the segments of a repository path
+// (those after /repos/{owner}/{repo}) reach, in the order of families.
+func familyClasses(method string, segs []string) []Class {
 	write := method != "GET"
 	var classes []Class
 	for _, f := range families {
@@ -250,9 +256,10 @@ func (o RESTOperation) repoScoped() bool {
 	return o.Class != ClassGlobal && o.Class != ClassUnscoped
 }
 
-// RESTTable is a validated set of REST operations, looked up by name.
+// RESTTable is a validated set of REST operations, looked up by name or matched against a request.
 type RESTTable struct {
 	byName map[string]RESTOperation
+	routes []route
 }
 
 var (
@@ -263,7 +270,9 @@ var (
 // NewRESTTable validates ops and builds a table. The error lists every problem.
 func NewRESTTable(ops []RESTOperation) (*RESTTable, error) {
 	t := &RESTTable{byName: make(map[string]RESTOperation, len(ops))}
-	routes := make(map[string]string, len(ops))
+	// shapes are the routes with their parameters reduced to their kind: two operations of the same
+	// shape would match the same requests.
+	shapes := make(map[string]string, len(ops))
 	var errs []error
 	for _, op := range ops {
 		if err := checkOperation(op); err != nil {
@@ -274,13 +283,15 @@ func NewRESTTable(ops []RESTOperation) (*RESTTable, error) {
 			errs = append(errs, fmt.Errorf("operation %s is defined twice", Printable(op.Name)))
 			continue
 		}
-		route := op.Method + " " + op.Path
-		if other, dup := routes[route]; dup {
-			errs = append(errs, fmt.Errorf("operations %s and %s both use %s", Printable(other), Printable(op.Name), Printable(route)))
+		rt := newRoute(op)
+		shape := rt.shape()
+		if other, dup := shapes[shape]; dup {
+			errs = append(errs, fmt.Errorf("operations %s and %s both use %s", Printable(other), Printable(op.Name), Printable(op.Method+" "+op.Path)))
 			continue
 		}
-		routes[route] = op.Name
+		shapes[shape] = op.Name
 		t.byName[op.Name] = op
+		t.routes = append(t.routes, rt)
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err

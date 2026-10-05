@@ -63,12 +63,11 @@ func (f *File) UserByKeyHash(hash []byte) (string, bool) {
 }
 
 // Policy builds the policy that decides requests from the file and the owners that have a
-// credential. The REST operation table comes with the REST proxy (SPEC.md section 16, M7); until
-// then every REST operation is unknown, and denied.
+// credential, with the REST operation table of v0.
 func (f *File) Policy(owners []string) (*core.Policy, error) {
 	st := f.State
 	st.Owners = owners
-	return core.NewPolicy(st, nil)
+	return core.NewPolicy(st, core.DefaultRESTTable())
 }
 
 // The file's YAML. The type names appear in decoding errors ("field acess not found in type

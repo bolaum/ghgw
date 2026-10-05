@@ -1,8 +1,8 @@
 # REST operations
 
-Status: proposal (milestone M6), waiting for the maintainer's approval. The maintainer's answers to
-the open questions are applied (section 8). Nothing here is implemented yet: M7 turns the tables
-below into the operation table of `internal/core`, with the tests of section 5.4.
+Status: approved (milestone M6), with the maintainer's answers to the open questions (section 8).
+M7 implements the tables below as the operation table of `internal/core` (`operations.go`), with
+the tests of section 5.4; change both together.
 
 This document proposes the REST operations of the `read` and `pr` presets (SPEC.md section 5.3).
 The table is the allow-list: anything it does not list is denied. v0 lists only what the agents
@@ -205,6 +205,11 @@ sensitive that is not registered as a secret; whoever may read CI on GitHub read
 | `pulls.create-reply-for-review-comment` | POST | `/repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies` | Answer a line comment in its thread. | [docs](https://docs.github.com/rest/pulls/comments#create-a-reply-for-a-review-comment) |
 | `actions.re-run-workflow-failed-jobs` | POST | `/repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs` | Re-run the failed jobs of a run, e.g. after a flaky failure. | [docs](https://docs.github.com/rest/actions/workflow-runs#re-run-failed-jobs-from-a-workflow-run) |
 
+Besides the presets, the table has the two `global` entries of SPEC.md section 5.3, allowed for
+every enabled user and forwarded without a credential, since their path names no owner:
+`rate-limit.get` (`GET /rate_limit`) and `meta.get` (`GET /meta`). Without a credential GitHub
+reports the gateway's own unauthenticated rate limit, not an owner's.
+
 ### 4.1 What limits every `pr` entry
 
 - Only the granted repositories, and every request is in ghgw's request log with the agent's name.
@@ -362,6 +367,12 @@ that repository; v0 leaves it out (section 7).
   is another owner or repository; GitHub's redirect for a renamed repository
   (`/repositories/{id}/...`) is not repository-scoped by name and is denied, with guidance to use
   the new name.
+- Pagination links are different: GitHub writes them with the repository's ID
+  (`<https://api.github.com/repositories/1296269/pulls?page=2>; rel="next"`), so a `Link` that
+  only changed host would make every second page a denied `/repositories/{id}` request. In a
+  `Link`, the gateway replaces `/repositories/{id}` with the `/repos/{owner}/{repo}` of the request
+  it answers: the page is of the same list, and its request gets a decision on that repository
+  anyway.
 - The exception is `actions.download-job-logs-for-workflow-run`: the gateway follows its redirect
   itself and streams the log to the agent, which never gets the signed URL. It follows one hop,
   only to an `https` URL, with a new request that carries neither the owner's credential nor any

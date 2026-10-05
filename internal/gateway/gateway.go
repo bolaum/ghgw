@@ -14,13 +14,18 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
+	"github.com/bolaum/ghgw/internal/core"
 	"github.com/bolaum/ghgw/internal/store"
 )
 
-// DefaultGitURL is where git is served on GitHub.
-const DefaultGitURL = "https://github.com"
+// DefaultGitURL is where git is served on GitHub, and DefaultAPIURL its REST API.
+const (
+	DefaultGitURL = "https://github.com"
+	DefaultAPIURL = "https://api.github.com"
+)
 
 // Config configures a Gateway.
 type Config struct {
@@ -31,6 +36,9 @@ type Config struct {
 	// GitURL is the base URL git requests are forwarded to: DefaultGitURL, or a fake GitHub in
 	// tests. It must be https: the owner's credential travels with every request.
 	GitURL string
+	// APIURL is the base URL REST requests are forwarded to: DefaultAPIURL, or a fake GitHub in
+	// tests. https only too.
+	APIURL string
 	// RootCAs verifies the upstream's certificate; nil means the system roots.
 	RootCAs *x509.CertPool
 	Logger  *slog.Logger
@@ -50,6 +58,12 @@ type limits struct {
 	uploadPackBody int64
 	// dial, tlsHandshake and responseHeader bound the upstream's steps before the body.
 	dial, tlsHandshake, responseHeader time.Duration
+	// restRequest bounds a forwarded REST request like request does a git one; API calls and job
+	// logs take far less.
+	restRequest time.Duration
+	// restBody bounds the body of a REST request, and restResponse the body of the answer: a
+	// review with dozens of line comments is a few KiB, a job log a few MiB.
+	restBody, restResponse int64
 }
 
 var defaultLimits = limits{
@@ -59,6 +73,9 @@ var defaultLimits = limits{
 	dial:           10 * time.Second,
 	tlsHandshake:   10 * time.Second,
 	responseHeader: 2 * time.Minute,
+	restRequest:    5 * time.Minute,
+	restBody:       core.MaxCheckedBody,
+	restResponse:   256 << 20,
 }
 
 // maxHeaderBytes bounds the header block of a request and of an upstream answer.
@@ -69,6 +86,7 @@ type Gateway struct {
 	policy    *policySource
 	store     *store.Store
 	gitURL    *url.URL
+	apiURL    *url.URL
 	transport *http.Transport
 	log       *slog.Logger
 	limits    limits
@@ -81,6 +99,10 @@ func New(ctx context.Context, cfg Config) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	apiURL, err := parseUpstream(cfg.APIURL)
+	if err != nil {
+		return nil, err
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -89,6 +111,7 @@ func New(ctx context.Context, cfg Config) (*Gateway, error) {
 		policy: &policySource{path: cfg.PolicyPath, store: cfg.Store, log: log},
 		store:  cfg.Store,
 		gitURL: gitURL,
+		apiURL: apiURL,
 		log:    log,
 		limits: defaultLimits,
 	}
@@ -129,9 +152,20 @@ func newTransport(rootCAs *x509.CertPool, l limits) *http.Transport {
 	}
 }
 
+// ServeHTTP routes on the path as decoded once, the path every handler decides on.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setDeadline(w, g.limits.answer)
-	g.serveGit(w, r)
+	switch rest, isREST := strings.CutPrefix(r.URL.Path, apiPrefix); {
+	case r.URL.Path == graphQLPath:
+		g.serveGraphQL(w, r)
+	case isREST && (rest == "" || strings.HasPrefix(rest, "/")):
+		if rest == "" {
+			rest = "/"
+		}
+		g.serveREST(w, r, rest)
+	default:
+		g.serveGit(w, r)
+	}
 }
 
 // setDeadline bounds reading the request and writing the answer to d from now. An error means the
@@ -143,8 +177,13 @@ func setDeadline(w http.ResponseWriter, d time.Duration) {
 	_ = rc.SetWriteDeadline(deadline)
 }
 
-// fail answers a request that is not forwarded. The message reads well after "ghgw: " and says
-// what to do next (SPEC.md section 8); git shows it to the agent as "remote: ghgw: ...".
+// answerFunc answers a request that is not forwarded, in the form its client shows: fail for git,
+// failJSON for gh. The message reads well after "ghgw: " and says what to do next (SPEC.md section
+// 8).
+type answerFunc func(w http.ResponseWriter, status int, format string, args ...any)
+
+// fail answers a git request that is not forwarded; git shows the message to the agent as
+// "remote: ghgw: ...".
 func fail(w http.ResponseWriter, status int, format string, args ...any) {
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")
