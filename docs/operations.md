@@ -272,8 +272,8 @@ Two risks are common to several entries and limited by the admin, not by the tab
   dismisses it. Line comment spam.
 - Limits: GitHub does not let a pull request's author approve it, and every pull request an agent
   opens is authored by the PAT's user, so agents cannot approve their own work. ghgw cannot see
-  `event`, which is in the body. Proposed as is; open question 1 asks whether M7 should read the
-  body and deny `APPROVE`.
+  `event`, which is in the body. The entry is proposed, and open question 1 proposes that M7 read
+  that field and deny `APPROVE`.
 
 **`pulls.create-reply-for-review-comment`**
 
