@@ -445,6 +445,18 @@ func TestDecidePush(t *testing.T) {
 				deniedRef(agentX, "the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again")),
 		},
 		{
+			name: "default branch longer than a ref",
+			user: "wide", repo: "bolaum/ghgw", op: Push{DefaultBranch: strings.Repeat("x", MaxRefNameLen-len("refs/heads/")+1), Updates: []RefUpdate{update(agentX)}},
+			want: deniedPush("the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again",
+				deniedRef(agentX, "the default branch of bolaum/ghgw is unknown or invalid, so the push cannot be checked; try again")),
+		},
+		{
+			name: "longest default branch",
+			user: "wide", repo: "bolaum/ghgw", op: Push{DefaultBranch: strings.Repeat("x", MaxRefNameLen-len("refs/heads/")), Updates: []RefUpdate{update(agentX)}},
+			want: result{Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8,
+				Refs: []refResult{{Ref: agentX, Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8}}},
+		},
+		{
 			name: "no repository",
 			user: "rpi01-agent", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(agentX)}},
 			want: deniedPush("push needs a repository", deniedRef(agentX, "push needs a repository")),

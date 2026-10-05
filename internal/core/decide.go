@@ -111,7 +111,7 @@ func decidePush(r Request, push Push, grants []*Grant) Decision {
 	if len(push.Updates) > MaxRefUpdates {
 		return deny(r, denialf("the push has %d ref updates, more than the %d allowed; push fewer refs at a time", len(push.Updates), MaxRefUpdates))
 	}
-	if checkRefName("refs/heads/"+push.DefaultBranch) != nil {
+	if defaultRef := "refs/heads/" + push.DefaultBranch; len(defaultRef) > MaxRefNameLen || checkRefName(defaultRef) != nil {
 		return deny(r, denialf("the default branch of %s is unknown or invalid, so the push cannot be checked; try again", Printable(r.Repo.String())))
 	}
 
