@@ -206,11 +206,13 @@ rejects a segment that is empty, `.` or `..`, or still contains `%`, `\` or a co
 and forwards the matched path with each segment escaped again, so GitHub sees the segments ghgw
 classified (`branches/agent%2Ffix` is forwarded as `branches/agent/fix`). A parameter that GitHub
 types as an integer (`{pull_number}`, `{comment_id}`, ...) matches ASCII digits only, so
-`pulls/comments` is not `pulls/{pull_number}`; any other parameter matches one segment, except the
-last parameter of a `read` template, which matches one or more (`contents/{path}`,
-`branches/{branch}`; bare `contents` is `repos.get-content`). When several templates match, a
-literal beats a parameter at the first position where they differ (`commits/{ref}/status` before
-`commits/{ref}`).
+`pulls/comments` is not `pulls/{pull_number}`. Any other parameter matches one segment, except
+`{path}` in `contents/{path}` and `{branch}` in `branches/{branch}`, which match one or more (bare
+`contents` is `repos.get-content`). A parameter may span segments only when it ends a `read`
+template and every `GET` route GitHub has below it is in a hard-rule family, so a longer value
+cannot name an operation the table leaves out; `commits/{ref}` fails that test
+(`commits/{ref}/comments`), so commit refs are one segment and agents pass a SHA. When several
+templates match, a literal beats a parameter at the first position where they differ.
 
 The table is the allow-list. The hard rules are also enforced on their own, from method and path
 families that do not depend on the table: an entry that falls in a family must have that family's

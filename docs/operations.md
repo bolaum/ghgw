@@ -292,14 +292,22 @@ and redirects. SPEC.md section 5.3 states the rules; this section gives the reas
   `{job_id}`. Without that, `pulls/{pull_number}` and `issues/{issue_number}` would also match
   `pulls/comments`, `issues/comments` and `issues/events`, repository-wide lists that are left
   out (6.4). Preferring literal routes does not help: those lists are not in the table to prefer.
-- **Parameters that span segments.** Branch names, refs and file paths contain `/`. The last
-  parameter of a `read` template, when it is not a number, matches one or more segments:
-  `contents/{path}`, `branches/{branch}`, `commits/{ref}`. `GET contents` (the root directory)
-  is `repos.get-content` too. A parameter in the middle of a template matches one segment, so
-  agents pass a SHA to `commits/{ref}/check-runs` and `commits/{ref}/status`, as in section 2.5.
+- **Parameters that span segments.** Branch names and file paths contain `/`, so two parameters
+  match one or more segments: `{path}` in `contents/{path}` and `{branch}` in
+  `branches/{branch}`. `GET contents` (the root directory) is `repos.get-content` too. A
+  parameter may span only when it ends a `read` template and every `GET` route GitHub has below
+  it is in a hard-rule family, so that a longer value cannot name an operation the table leaves
+  out: there is none below `contents/{path}`, and only branch protection (Administration) below
+  `branches/{branch}`. Every other parameter matches one segment.
+- **Commit refs.** `{ref}` in `commits/{ref}` matches one segment. GitHub has five reads below it
+  that are left out (6.4): `commits/{ref}/comments`, `pulls`, `branches-where-head`,
+  `check-suites` and `statuses`. A spanning `{ref}` would admit them as `repos.get-commit` of a
+  ref named `3f2a9c1/comments`, and literal precedence cannot help, since they are not in the
+  table. Agents pass a SHA (`git rev-parse`), as in sections 2.2 and 2.5, or a branch name
+  without `/`.
 - **Precedence.** When several templates match, the first position where they differ decides:
-  a literal beats a parameter. `commits/3f2a9c1/status` is
-  `repos.get-combined-status-for-ref`, not `repos.get-commit` of a ref named `3f2a9c1/status`.
+  a literal beats a parameter. In this table numbers and single segments already keep the
+  templates apart, so the rule only settles later entries.
 - **Families.** `NewRESTTable` keeps treating every parameter as any one segment, which covers
   the numbers. Longer values of a spanning parameter can reach a family
   (`branches/agent/x/protection`); the gateway checks the families on the concrete path of every
@@ -349,6 +357,12 @@ M7's tests cover, against the fake GitHub:
 - `branches/main/protection`, `branches/agent/x/protection`, `branches/main%2Fprotection` and
   `branches/main%252Fprotection`: denied, and no request reaches the upstream.
   `branches/agent/fix-42` and `branches/agent%2Ffix-42` are `repos.get-branch` of `agent/fix-42`.
+- `commits/3f2a9c1/` followed by `comments`, `pulls`, `branches-where-head`, `check-suites` or
+  `statuses`, and the same five with `3f2a9c1%2F`: denied as unknown operations, and no request
+  reaches the upstream. `commits/agent/fix-42` and `commits/agent%2Ffix-42`: denied.
+  `commits/3f2a9c1`, `commits/main`, `commits/3f2a9c1/check-runs` and `commits/3f2a9c1/status`
+  are `repos.get-commit`, `repos.get-commit`, `checks.list-for-ref` and
+  `repos.get-combined-status-for-ref`.
 - `contents`, `contents/internal/core/rest.go`, and paths with empty, `.` and `..` segments.
 - A `Location` to another owner's repository: rewritten, and the agent's next request is decided
   on that repository and uses that owner's credential. `/repositories/{id}`: denied.
@@ -456,7 +470,9 @@ The maintainer's answers to the questions this proposal asked:
    merges (`pulls.merge` needs Contents write, which push needs too), so ghgw's hard rule is the
    only barrier.
 8. **Parameters that span segments.** The last parameter of a `read` template may span segments,
-   on the canonical path; bare `contents` is `repos.get-content` (section 5.1).
+   on the canonical path; bare `contents` is `repos.get-content` (section 5.1). Applied to
+   `contents/{path}` and `branches/{branch}` only: a spanning `commits/{ref}` would also match
+   commit reads that are left out.
 9. **Identity.** No machine-user recommendation; GitHub App credentials are the v1 answer.
 10. **`gh run`.** `gh api` only in v0; `gh run` support is v1 (section 7).
 
