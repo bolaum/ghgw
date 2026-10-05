@@ -107,9 +107,14 @@ users:
 			want: "denied: unknown user laptop-agent; ask the admin to create it",
 		},
 		{
-			name: "REST operation before the REST table",
+			name: "REST operation",
 			args: []string{"--user", "rpi01-agent", "--repo", "bolaum/ghgw", "--op", "pulls.create"},
-			want: "denied: unknown operation pulls.create; ghgw only forwards the API operations it knows",
+			want: "allowed by grant 1 of group agents",
+		},
+		{
+			name: "REST operation outside the table",
+			args: []string{"--user", "rpi01-agent", "--repo", "bolaum/ghgw", "--op", "pulls.merge"},
+			want: "denied: unknown operation pulls.merge; ghgw only forwards the API operations it knows",
 		},
 	}
 	for _, tt := range tests {

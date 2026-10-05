@@ -33,6 +33,7 @@ func newExplainCmd() *cobra.Command {
 			"decision.",
 		Example: "  ghgw explain --user rpi01-agent --repo bolaum/ghgw --op fetch\n" +
 			"  ghgw explain --user rpi01-agent --repo bolaum/ghgw --op push\n" +
+			"  ghgw explain --user rpi01-agent --repo bolaum/ghgw --op pulls.create\n" +
 			"  ghgw explain --user rpi01-agent --repo bolaum/ghgw --op push --default-branch main \\\n" +
 			"      --ref agent/fix-tests --ref main --ref :agent/old --json",
 		Args: cobra.NoArgs,
