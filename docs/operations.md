@@ -158,3 +158,41 @@ Labels go on pull requests the same way, by their number.
 gh api -X POST repos/{owner}/{repo}/actions/runs/1234/rerun-failed-jobs # actions.re-run-workflow-failed-jobs
 gh api repos/{owner}/{repo}/actions/runs/1234 --jq '[.status, .conclusion]'  # actions.get-workflow-run
 ```
+
+## 3. The `read` preset
+
+Every entry is a `GET` on one repository of the grant.
+
+| Name | Method | Path | Rationale | Docs |
+|---|---|---|---|---|
+| `repos.get` | GET | `/repos/{owner}/{repo}` | Default branch, visibility and the credential's permissions: where every workflow starts. | [docs](https://docs.github.com/rest/repos/repos#get-a-repository) |
+| `repos.get-content` | GET | `/repos/{owner}/{repo}/contents/{path}` | A file or a directory at any ref, without fetching it. | [docs](https://docs.github.com/rest/repos/contents#get-repository-content) |
+| `repos.list-branches` | GET | `/repos/{owner}/{repo}/branches` | Which branches exist, e.g. whether the agent's branch is there. | [docs](https://docs.github.com/rest/branches/branches#list-branches) |
+| `repos.get-branch` | GET | `/repos/{owner}/{repo}/branches/{branch}` | The head commit of one branch, to compare with the clone. | [docs](https://docs.github.com/rest/branches/branches#get-a-branch) |
+| `repos.list-commits` | GET | `/repos/{owner}/{repo}/commits` | History of a branch or a path. | [docs](https://docs.github.com/rest/commits/commits#list-commits) |
+| `repos.get-commit` | GET | `/repos/{owner}/{repo}/commits/{ref}` | One commit and its files; its diff with the diff media type. | [docs](https://docs.github.com/rest/commits/commits#get-a-commit) |
+| `pulls.list` | GET | `/repos/{owner}/{repo}/pulls` | Find pull requests, e.g. the open one for the agent's branch (`head=`). | [docs](https://docs.github.com/rest/pulls/pulls#list-pull-requests) |
+| `pulls.get` | GET | `/repos/{owner}/{repo}/pulls/{pull_number}` | State, base, head and body of one pull request; its diff with the diff media type. | [docs](https://docs.github.com/rest/pulls/pulls#get-a-pull-request) |
+| `pulls.list-commits` | GET | `/repos/{owner}/{repo}/pulls/{pull_number}/commits` | The commits a pull request brings. | [docs](https://docs.github.com/rest/pulls/pulls#list-commits-on-a-pull-request) |
+| `pulls.list-files` | GET | `/repos/{owner}/{repo}/pulls/{pull_number}/files` | Changed files and their patches, for a review. | [docs](https://docs.github.com/rest/pulls/pulls#list-pull-requests-files) |
+| `pulls.list-reviews` | GET | `/repos/{owner}/{repo}/pulls/{pull_number}/reviews` | Review verdicts and their summaries. | [docs](https://docs.github.com/rest/pulls/reviews#list-reviews-for-a-pull-request) |
+| `pulls.get-review` | GET | `/repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}` | One review, as linked by `#pullrequestreview-<id>`. | [docs](https://docs.github.com/rest/pulls/reviews#get-a-review-for-a-pull-request) |
+| `pulls.list-review-comments` | GET | `/repos/{owner}/{repo}/pulls/{pull_number}/comments` | Line comments, with the IDs that replies need. | [docs](https://docs.github.com/rest/pulls/comments#list-review-comments-on-a-pull-request) |
+| `pulls.get-review-comment` | GET | `/repos/{owner}/{repo}/pulls/comments/{comment_id}` | One line comment, as linked by `#discussion_r<id>`. | [docs](https://docs.github.com/rest/pulls/comments#get-a-review-comment-for-a-pull-request) |
+| `issues.list-for-repo` | GET | `/repos/{owner}/{repo}/issues` | Find issues (GitHub lists pull requests here too). | [docs](https://docs.github.com/rest/issues/issues#list-repository-issues) |
+| `issues.get` | GET | `/repos/{owner}/{repo}/issues/{issue_number}` | One issue: title, body, labels, state. | [docs](https://docs.github.com/rest/issues/issues#get-an-issue) |
+| `issues.list-comments` | GET | `/repos/{owner}/{repo}/issues/{issue_number}/comments` | The conversation of an issue or a pull request. | [docs](https://docs.github.com/rest/issues/comments#list-issue-comments) |
+| `issues.get-comment` | GET | `/repos/{owner}/{repo}/issues/comments/{comment_id}` | One comment, as linked by `#issuecomment-<id>`. | [docs](https://docs.github.com/rest/issues/comments#get-an-issue-comment) |
+| `issues.list-labels-for-repo` | GET | `/repos/{owner}/{repo}/labels` | The labels that exist, so the agent adds those rather than invent names. | [docs](https://docs.github.com/rest/issues/labels#list-labels-for-a-repository) |
+| `repos.list-releases` | GET | `/repos/{owner}/{repo}/releases` | Versions and release notes. | [docs](https://docs.github.com/rest/releases/releases#list-releases) |
+| `repos.get-release-by-tag` | GET | `/repos/{owner}/{repo}/releases/tags/{tag}` | The release of a known tag. | [docs](https://docs.github.com/rest/releases/releases#get-a-release-by-tag-name) |
+| `checks.list-for-ref` | GET | `/repos/{owner}/{repo}/commits/{ref}/check-runs` | CI results of a commit, from Actions and other apps (open question 2). | [docs](https://docs.github.com/rest/checks/runs#list-check-runs-for-a-git-reference) |
+| `repos.get-combined-status-for-ref` | GET | `/repos/{owner}/{repo}/commits/{ref}/status` | CI results reported as commit statuses (older integrations). | [docs](https://docs.github.com/rest/commits/statuses#get-the-combined-status-for-a-specific-reference) |
+| `actions.list-workflow-runs-for-repo` | GET | `/repos/{owner}/{repo}/actions/runs` | The runs of a branch or a commit (`branch=`, `head_sha=`). | [docs](https://docs.github.com/rest/actions/workflow-runs#list-workflow-runs-for-a-repository) |
+| `actions.get-workflow-run` | GET | `/repos/{owner}/{repo}/actions/runs/{run_id}` | One run's status, e.g. after a re-run. | [docs](https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run) |
+| `actions.list-jobs-for-workflow-run` | GET | `/repos/{owner}/{repo}/actions/runs/{run_id}/jobs` | Which jobs and steps failed. | [docs](https://docs.github.com/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run) |
+| `actions.download-job-logs-for-workflow-run` | GET | `/repos/{owner}/{repo}/actions/jobs/{job_id}/logs` | The log of a failed job: what the agent fixes from. | [docs](https://docs.github.com/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run) |
+
+What `read` exposes beyond a clone: issues, pull requests, comments and CI logs of the granted
+repositories. GitHub masks registered secrets in logs, but a workflow can still print something
+sensitive that is not registered as a secret; whoever may read CI on GitHub reads the same logs.
