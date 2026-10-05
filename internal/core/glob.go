@@ -28,23 +28,23 @@ type RepoGlob struct {
 func ParseRepoGlob(s string) (RepoGlob, error) {
 	owner, name, ok := strings.Cut(s, "/")
 	if !ok {
-		return RepoGlob{}, fmt.Errorf("repository pattern %q: want owner/name, e.g. bolaum/* or acme/app", s)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: want owner/name, e.g. bolaum/* or acme/app", printable(s))
 	}
 	if strings.Contains(owner, "*") {
-		return RepoGlob{}, fmt.Errorf("repository pattern %q: the owner cannot contain '*'; add one pattern per owner", s)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: the owner cannot contain '*'; add one pattern per owner", printable(s))
 	}
 	if err := checkOwnerName(owner); err != nil {
-		return RepoGlob{}, fmt.Errorf("repository pattern %q: %w", s, err)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: %w", printable(s), err)
 	}
 	if strings.Contains(name, "**") {
-		return RepoGlob{}, fmt.Errorf("repository pattern %q: use '*' in the name, not '**'", s)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: use '*' in the name, not '**'", printable(s))
 	}
 	literal := strings.ReplaceAll(name, "*", "")
 	if name == "" || name == "." || name == ".." || literal != "" && !repoNameRE.MatchString(literal) {
-		return RepoGlob{}, fmt.Errorf("repository pattern %q: name must be letters, digits, '.', '-', '_' or '*'", s)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: name must be letters, digits, '.', '-', '_' or '*'", printable(s))
 	}
 	if hasGitSuffix(name) {
-		return RepoGlob{}, fmt.Errorf("repository pattern %q: write the name without the .git suffix", s)
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: write the name without the .git suffix", printable(s))
 	}
 	return RepoGlob{text: s, owner: owner, name: compileGlob(name, "(?i)", ".*")}, nil
 }
@@ -81,16 +81,16 @@ func ParseBranchGlob(s string) (BranchGlob, error) {
 		return BranchGlob{}, errors.New("branch pattern is empty")
 	}
 	if strings.HasPrefix(s, "refs/") {
-		return BranchGlob{}, fmt.Errorf("branch pattern %q: write the branch name without refs/heads/", s)
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: write the branch name without refs/heads/", printable(s))
 	}
 	if strings.Contains(s, "***") {
-		return BranchGlob{}, fmt.Errorf("branch pattern %q: use '*' or '**', not three stars", s)
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: use '*' or '**', not three stars", printable(s))
 	}
 	if strings.Contains(s, "+") || strings.HasPrefix(s, "!") {
-		return BranchGlob{}, fmt.Errorf("branch pattern %q: only literals, '*' and '**' are supported", s)
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: only literals, '*' and '**' are supported", printable(s))
 	}
 	if err := checkRefName("refs/heads/" + starsRE.ReplaceAllString(s, "x")); err != nil {
-		return BranchGlob{}, fmt.Errorf("branch pattern %q: %w", s, err)
+		return BranchGlob{}, fmt.Errorf("branch pattern %s: %w", printable(s), err)
 	}
 	return BranchGlob{text: s, re: compileGlob(s, "", "[^/]*")}, nil
 }

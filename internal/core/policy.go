@@ -36,13 +36,14 @@ type Holder struct {
 
 // String reads as "user rpi01-agent" or "group agents", as in decision reasons.
 func (h Holder) String() string {
+	name := printable(h.Name)
 	switch h.Kind {
 	case HolderUser:
-		return "user " + h.Name
+		return "user " + name
 	case HolderGroup:
-		return "group " + h.Name
+		return "group " + name
 	}
-	return "holder " + h.Name
+	return "holder " + name
 }
 
 // Access is the git access a grant gives.
@@ -169,9 +170,9 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 		for _, m := range g.Members {
 			switch _, ok := p.users[m]; {
 			case !ok:
-				errs = append(errs, fmt.Errorf("group %s: member %s is not a user; create the user first", g.Name, m))
+				errs = append(errs, fmt.Errorf("group %s: member %s is not a user; create the user first", g.Name, printable(m)))
 			case slices.Contains(members[g.Name], m):
-				errs = append(errs, fmt.Errorf("group %s: member %s is listed twice", g.Name, m))
+				errs = append(errs, fmt.Errorf("group %s: member %s is listed twice", g.Name, printable(m)))
 			default:
 				members[g.Name] = append(members[g.Name], m)
 			}
@@ -252,7 +253,7 @@ func checkGrant(g Grant, users map[string]User, groups map[string][]string) erro
 		}
 	case AccessWrite:
 	default:
-		return fmt.Errorf("%s: access must be read or write, not %q", g, g.Access)
+		return fmt.Errorf("%s: access must be read or write, not %s", g, printable(string(g.Access)))
 	}
 	for _, b := range g.Push {
 		if b.re == nil {
@@ -262,7 +263,7 @@ func checkGrant(g Grant, users map[string]User, groups map[string][]string) erro
 	switch g.API {
 	case PresetNone, PresetRead, PresetPR:
 	default:
-		return fmt.Errorf("%s: api must be read or pr (or empty for none), not %q", g, g.API)
+		return fmt.Errorf("%s: api must be read or pr (or empty for none), not %s", g, printable(string(g.API)))
 	}
 	return nil
 }

@@ -260,8 +260,9 @@ func TestDecidePush(t *testing.T) {
 		return result{Reason: reason, Refs: refs}
 	}
 	const (
-		defaultBranch = "push to the default branch is not allowed; allowed branches: agent/**"
-		another       = "another ref was rejected"
+		defaultBranchRef = "push to the default branch is not allowed"
+		defaultBranch    = defaultBranchRef + "; allowed branches: agent/**"
+		another          = "another ref was rejected"
 	)
 
 	runDecideTests(t, testPolicy(t), []decideTest{
@@ -289,83 +290,83 @@ func TestDecidePush(t *testing.T) {
 			name: "branch outside the globs",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(feature)}},
 			want: deniedPush("push to branch feature/x is not allowed; allowed branches: agent/**",
-				deniedRef(feature, "push to branch feature/x is not allowed; allowed branches: agent/**")),
+				deniedRef(feature, "push to branch feature/x is not allowed")),
 		},
 		{
 			name: "delete a branch outside the globs",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{remove(feature)}},
 			want: deniedPush("deleting branch feature/x is not allowed; allowed branches: agent/**",
-				deniedRef(feature, "deleting branch feature/x is not allowed; allowed branches: agent/**")),
+				deniedRef(feature, "deleting branch feature/x is not allowed")),
 		},
 		{
 			name: "default branch",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{update(main)}},
-			want: deniedPush(defaultBranch, deniedRef(main, defaultBranch)),
+			want: deniedPush(defaultBranch, deniedRef(main, defaultBranchRef)),
 		},
 		{
 			name: "create the default branch",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(main)}},
-			want: deniedPush(defaultBranch, deniedRef(main, defaultBranch)),
+			want: deniedPush(defaultBranch, deniedRef(main, defaultBranchRef)),
 		},
 		{
 			name: "default branch in another case",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{update("refs/heads/MAIN")}},
-			want: deniedPush(defaultBranch, deniedRef("refs/heads/MAIN", defaultBranch)),
+			want: deniedPush(defaultBranch, deniedRef("refs/heads/MAIN", defaultBranchRef)),
 		},
 		{
 			name: "delete the default branch",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{remove(main)}},
 			want: deniedPush("deleting the default branch is not allowed; allowed branches: agent/**",
-				deniedRef(main, "deleting the default branch is not allowed; allowed branches: agent/**")),
+				deniedRef(main, "deleting the default branch is not allowed")),
 		},
 		{
 			name: "default branch matched by a push glob",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "agent/x", Updates: []RefUpdate{update(agentX)}},
-			want: deniedPush(defaultBranch, deniedRef(agentX, defaultBranch)),
+			want: deniedPush(defaultBranch, deniedRef(agentX, defaultBranchRef)),
 		},
 		{
 			name: "create a tag",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(tag)}},
 			want: deniedPush("pushing tags is not allowed; allowed branches: agent/**",
-				deniedRef(tag, "pushing tags is not allowed; allowed branches: agent/**")),
+				deniedRef(tag, "pushing tags is not allowed")),
 		},
 		{
 			name: "delete a tag",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{remove(tag)}},
 			want: deniedPush("pushing tags is not allowed; allowed branches: agent/**",
-				deniedRef(tag, "pushing tags is not allowed; allowed branches: agent/**")),
+				deniedRef(tag, "pushing tags is not allowed")),
 		},
 		{
 			name: "other refs",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{update("refs/notes/commits")}},
 			want: deniedPush("pushing refs/notes/commits is not allowed, only branches can be pushed; allowed branches: agent/**",
-				deniedRef("refs/notes/commits", "pushing refs/notes/commits is not allowed, only branches can be pushed; allowed branches: agent/**")),
+				deniedRef("refs/notes/commits", "pushing refs/notes/commits is not allowed, only branches can be pushed")),
 		},
 		{
 			name: "invalid ref name",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{update("refs/heads/agent/../main")}},
-			want: deniedPush(`invalid ref name "refs/heads/agent/../main": cannot contain ".."; allowed branches: agent/**`,
-				deniedRef("refs/heads/agent/../main", `invalid ref name "refs/heads/agent/../main": cannot contain ".."; allowed branches: agent/**`)),
+			want: deniedPush(`invalid ref name refs/heads/agent/../main: cannot contain ".."; allowed branches: agent/**`,
+				deniedRef("refs/heads/agent/../main", `invalid ref name refs/heads/agent/../main: cannot contain ".."`)),
 		},
 		{
 			name: "unknown update kind",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{{Ref: agentX}}},
 			want: deniedPush("unknown update of refs/heads/agent/x; allowed branches: agent/**",
-				deniedRef(agentX, "unknown update of refs/heads/agent/x; allowed branches: agent/**")),
+				deniedRef(agentX, "unknown update of refs/heads/agent/x")),
 		},
 		{
 			name: "all or nothing",
 			user: "rpi01-agent", repo: "bolaum/ghgw",
 			op:   Push{DefaultBranch: "main", Updates: []RefUpdate{create(agentX), update(main)}},
-			want: deniedPush(defaultBranch, deniedRef(agentX, another), deniedRef(main, defaultBranch)),
+			want: deniedPush(defaultBranch, deniedRef(agentX, another), deniedRef(main, defaultBranchRef)),
 		},
 		{
 			name: "several rejected refs keep their own reasons; the first one is the push's reason",
 			user: "rpi01-agent", repo: "bolaum/ghgw",
 			op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(feature), create(tag), update(agentX)}},
 			want: deniedPush("push to branch feature/x is not allowed; allowed branches: agent/**",
-				deniedRef(feature, "push to branch feature/x is not allowed; allowed branches: agent/**"),
-				deniedRef(tag, "pushing tags is not allowed; allowed branches: agent/**"),
+				deniedRef(feature, "push to branch feature/x is not allowed"),
+				deniedRef(tag, "pushing tags is not allowed"),
 				deniedRef(agentX, another)),
 		},
 		{
@@ -379,7 +380,7 @@ func TestDecidePush(t *testing.T) {
 			name: "repository not granted",
 			user: "rpi01-agent", repo: "acme/secret", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(agentX)}},
 			want: deniedPush("rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, nocred/app",
-				deniedRef(agentX, "rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, nocred/app")),
+				deniedRef(agentX, "rpi01-agent cannot access acme/secret")),
 		},
 		{
 			name: "disabled user",
@@ -397,7 +398,7 @@ func TestDecidePush(t *testing.T) {
 			name: "write access with no push branches",
 			user: "nopush", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(agentX)}},
 			want: deniedPush("push to branch agent/x is not allowed; allowed branches: none",
-				deniedRef(agentX, "push to branch agent/x is not allowed; allowed branches: none")),
+				deniedRef(agentX, "push to branch agent/x is not allowed")),
 		},
 		{
 			name: "refs allowed by different grants",
@@ -412,13 +413,13 @@ func TestDecidePush(t *testing.T) {
 			name: "allowed branches are the union of the matching write grants",
 			user: "multi", repo: "bolaum/app", op: Push{DefaultBranch: "main", Updates: []RefUpdate{update(main)}},
 			want: deniedPush("push to the default branch is not allowed; allowed branches: feature/*, agent/**",
-				deniedRef(main, "push to the default branch is not allowed; allowed branches: feature/*, agent/**")),
+				deniedRef(main, "push to the default branch is not allowed")),
 		},
 		{
 			name: "push globs of grants for other repositories do not apply",
 			user: "multi", repo: "bolaum/other", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(feature)}},
 			want: deniedPush("push to branch feature/x is not allowed; allowed branches: agent/**",
-				deniedRef(feature, "push to branch feature/x is not allowed; allowed branches: agent/**")),
+				deniedRef(feature, "push to branch feature/x is not allowed")),
 		},
 		{
 			name: "no updates fails closed",
@@ -491,13 +492,13 @@ func TestDecidePushAccess(t *testing.T) {
 func TestDecidePushHardRules(t *testing.T) {
 	const all = "; allowed branches: **"
 	denied := func(ref, reason string) result {
-		return result{Reason: reason + all, Refs: []refResult{{Ref: ref, Reason: reason + all}}}
+		return result{Reason: reason + all, Refs: []refResult{{Ref: ref, Reason: reason}}}
 	}
 	notBranch := func(ref string) result {
 		return denied(ref, "pushing "+ref+" is not allowed, only branches can be pushed")
 	}
 	invalid := func(ref, why string) result {
-		return denied(ref, fmt.Sprintf("invalid ref name %q: %s", ref, why))
+		return denied(ref, fmt.Sprintf("invalid ref name %s: %s", printable(ref), why))
 	}
 	push := func(u RefUpdate) Push { return Push{DefaultBranch: "main", Updates: []RefUpdate{u}} }
 	injected := "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J"
@@ -549,7 +550,7 @@ func TestDecidePushHardRules(t *testing.T) {
 
 	d := testPolicy(t).Decide(Request{User: "wide", Repo: mustRepo(t, "bolaum/ghgw"), Op: push(create(injected))})
 	want := `denied: invalid ref name "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": cannot contain '\n'; allowed branches: **` + "\n" +
-		`  "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": denied: invalid ref name "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": cannot contain '\n'; allowed branches: **`
+		`  "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": denied: invalid ref name "refs/heads/agent/x\nallowed by grant 1 of group agents\n\x1b[2J": cannot contain '\n'`
 	if got := d.String(); got != want {
 		t.Errorf("String() =\n%s\nwant\n%s", got, want)
 	}
@@ -565,20 +566,21 @@ func TestDecidePushAllOrNothing(t *testing.T) {
 	const (
 		agentX  = "refs/heads/agent/x"
 		tag     = "refs/tags/v1"
-		tagDeny = "pushing tags is not allowed; allowed branches: agent/**"
+		tagRef  = "pushing tags is not allowed"
+		tagDeny = tagRef + "; allowed branches: agent/**"
 		another = "another ref was rejected"
 		noCred  = "ghgw has no credential for owner nocred; ask the admin to add one"
 	)
 	push := func(us ...RefUpdate) Push { return Push{DefaultBranch: "main", Updates: us} }
 	runDecideTests(t, testPolicy(t), []decideTest{
 		{name: "allowed first", user: "rpi01-agent", repo: "bolaum/ghgw", op: push(create(agentX), create(tag)),
-			want: result{Reason: tagDeny, Refs: []refResult{{Ref: agentX, Reason: another}, {Ref: tag, Reason: tagDeny}}}},
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: agentX, Reason: another}, {Ref: tag, Reason: tagRef}}}},
 		{name: "forbidden first", user: "rpi01-agent", repo: "bolaum/ghgw", op: push(create(tag), create(agentX)),
-			want: result{Reason: tagDeny, Refs: []refResult{{Ref: tag, Reason: tagDeny}, {Ref: agentX, Reason: another}}}},
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: tag, Reason: tagRef}, {Ref: agentX, Reason: another}}}},
 		{name: "allowed first, no credential", user: "rpi01-agent", repo: "nocred/app", op: push(create(agentX), create(tag)),
-			want: result{Reason: tagDeny, Refs: []refResult{{Ref: agentX, Reason: another}, {Ref: tag, Reason: tagDeny}}}},
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: agentX, Reason: another}, {Ref: tag, Reason: tagRef}}}},
 		{name: "forbidden first, no credential", user: "rpi01-agent", repo: "nocred/app", op: push(create(tag), create(agentX)),
-			want: result{Reason: tagDeny, Refs: []refResult{{Ref: tag, Reason: tagDeny}, {Ref: agentX, Reason: another}}}},
+			want: result{Reason: tagDeny, Refs: []refResult{{Ref: tag, Reason: tagRef}, {Ref: agentX, Reason: another}}}},
 		{name: "all allowed, no credential", user: "rpi01-agent", repo: "nocred/app", op: push(create(agentX), update("refs/heads/agent/y")),
 			want: result{Reason: noCred, Refs: []refResult{{Ref: agentX, Reason: noCred}, {Ref: "refs/heads/agent/y", Reason: noCred}}}},
 	})
@@ -750,7 +752,7 @@ func TestDecideREST(t *testing.T) {
 		{
 			name: "unknown operation",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: REST{Name: "pulls.fly"},
-			want: result{Reason: `unknown operation "pulls.fly"; ghgw only forwards the API operations it knows`},
+			want: result{Reason: `unknown operation pulls.fly; ghgw only forwards the API operations it knows`},
 		},
 		{
 			name: "owner without credential",
@@ -802,7 +804,7 @@ func TestDecideREST(t *testing.T) {
 		runDecideTests(t, p, []decideTest{{
 			name: "every operation is unknown",
 			user: "a", repo: "bolaum/ghgw", op: REST{Name: "pulls.list"},
-			want: result{Reason: `unknown operation "pulls.list"; ghgw only forwards the API operations it knows`},
+			want: result{Reason: `unknown operation pulls.list; ghgw only forwards the API operations it knows`},
 		}})
 	})
 }
@@ -841,7 +843,7 @@ func TestDecisionString(t *testing.T) {
 			}}},
 			want: "denied: push to the default branch is not allowed; allowed branches: agent/**\n" +
 				"  refs/heads/agent/x: denied: another ref was rejected\n" +
-				"  refs/heads/main: denied: push to the default branch is not allowed; allowed branches: agent/**",
+				"  refs/heads/main: denied: push to the default branch is not allowed",
 		},
 	}
 	for _, tt := range tests {
@@ -926,8 +928,8 @@ func TestDecidePushLimits(t *testing.T) {
 	}
 	d = p.Decide(Request{User: "rpi01-agent", Repo: repo, Op: Push{DefaultBranch: "main", Updates: updates(MaxRefUpdates + 1)}})
 	want := "the push has 1001 ref updates, more than the 1000 allowed; push fewer refs at a time"
-	if d.Allowed || d.Reason != want || len(d.Refs) != MaxRefUpdates+1 || d.Refs[0].Allowed || d.Refs[0].Reason != want {
-		t.Errorf("push of %d refs = %+v, want denied with %q on every ref", MaxRefUpdates+1, summarize(d).Reason, want)
+	if d.Allowed || d.Reason != want || d.Refs != nil {
+		t.Errorf("push of %d refs = %q with %d refs, want %q as a whole, with no refs", MaxRefUpdates+1, d.Reason, len(d.Refs), want)
 	}
 
 	longest := "refs/heads/agent/" + strings.Repeat("a", MaxRefNameLen-len("refs/heads/agent/"))
@@ -943,7 +945,7 @@ func TestDecidePushLimits(t *testing.T) {
 			name: "ref name one byte too long",
 			user: "rpi01-agent", repo: "bolaum/ghgw", op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(tooLong)}},
 			want: result{Reason: "ref name is 1025 bytes, longer than the 1024 allowed; allowed branches: agent/**",
-				Refs: []refResult{{Ref: tooLong, Reason: "ref name is 1025 bytes, longer than the 1024 allowed; allowed branches: agent/**"}}},
+				Refs: []refResult{{Ref: tooLong, Reason: "ref name is 1025 bytes, longer than the 1024 allowed"}}},
 		},
 	})
 	d = p.Decide(Request{User: "rpi01-agent", Repo: repo, Op: Push{DefaultBranch: "main", Updates: []RefUpdate{create(tooLong + "\n")}}})
@@ -997,8 +999,8 @@ func TestDecideUnsafeErrorPaths(t *testing.T) {
 			t.Run(fmt.Sprintf("%U kind %d", []rune(char)[0], kind), func(t *testing.T) {
 				d := p.Decide(Request{User: "wide", Repo: mustRepo(t, "bolaum/ghgw"),
 					Op: Push{DefaultBranch: "main", Updates: []RefUpdate{{Ref: ref, Kind: kind}}}})
-				reason := "unknown update of " + strconv.QuoteToASCII(ref) + "; allowed branches: **"
-				want := result{Reason: reason, Refs: []refResult{{Ref: ref, Reason: reason}}}
+				reason := "unknown update of " + strconv.QuoteToASCII(ref)
+				want := result{Reason: reason + "; allowed branches: **", Refs: []refResult{{Ref: ref, Reason: reason}}}
 				if got := summarize(d); !reflect.DeepEqual(got, want) {
 					t.Errorf("Decide() =\n%+v\nwant\n%+v", got, want)
 				}
@@ -1110,6 +1112,144 @@ func TestDecideRefsNamespaceBranch(t *testing.T) {
 				Refs: []refResult{{Ref: ref, Allowed: true, Reason: "allowed by grant 8 of user wide", Grant: 8}}}},
 		{name: "not matched by agent/**", user: "rpi01-agent", repo: "bolaum/ghgw", op: push,
 			want: result{Reason: "push to branch refs/topic is not allowed; allowed branches: agent/**",
-				Refs: []refResult{{Ref: ref, Reason: "push to branch refs/topic is not allowed; allowed branches: agent/**"}}}},
+				Refs: []refResult{{Ref: ref, Reason: "push to branch refs/topic is not allowed"}}}},
 	})
+}
+
+// allocated returns the bytes f allocates.
+func allocated(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// TestDecidePushGuidanceIsBounded uses 1000 long branch patterns (about 1 MB of guidance) and 1000
+// denied tag updates: the guidance appears once, cut to its budget, and no ref copies it.
+func TestDecidePushGuidanceIsBounded(t *testing.T) {
+	push := make([]string, 1000)
+	for i := range push {
+		push[i] = fmt.Sprintf("agent/p%04d/%s/*", i, strings.Repeat("a", 970))
+	}
+	p, err := NewPolicy(State{
+		Users:  []User{{Name: "a"}},
+		Grants: []Grant{grant(t, 1, "user a", []string{"o/*"}, AccessWrite, push, PresetNone)},
+		Owners: []string{"o"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := make([]RefUpdate, MaxRefUpdates)
+	for i := range updates {
+		updates[i] = create(fmt.Sprintf("refs/tags/t%04d", i))
+	}
+	req := Request{User: "a", Repo: mustRepo(t, "o/x"), Op: Push{DefaultBranch: "main", Updates: updates}}
+
+	var d Decision
+	var out string
+	if got := allocated(func() { d = p.Decide(req); out = d.String() }); got > 2<<20 {
+		t.Errorf("Decide and String allocated %d bytes, want at most 2 MiB", got)
+	}
+	if d.Allowed || len(d.Refs) != MaxRefUpdates {
+		t.Fatalf("Decide() allowed = %v with %d refs, want denied with %d", d.Allowed, len(d.Refs), MaxRefUpdates)
+	}
+	for _, rd := range d.Refs {
+		if rd.Allowed || rd.Grant != (GrantIdentity{}) || rd.Reason != "pushing tags is not allowed" {
+			t.Fatalf("ref %+v, want denied with the short reason", rd)
+		}
+	}
+	if len(d.Reason) > 2*guidanceBudget || !strings.HasSuffix(d.Reason, " and 999 more") {
+		t.Errorf("reason is %d bytes, want the guidance cut to its budget:\n%.200s...", len(d.Reason), d.Reason)
+	}
+	if len(out) > 100*MaxRefUpdates {
+		t.Errorf("explain output is %d bytes, want about one short line per ref", len(out))
+	}
+}
+
+// TestDecideOversizedPush sends a million updates on every path: the push is rejected as a whole,
+// without per-ref entries or per-ref work.
+func TestDecideOversizedPush(t *testing.T) {
+	updates := make([]RefUpdate, 1_000_000)
+	for i := range updates {
+		updates[i] = create("refs/heads/agent/x")
+	}
+	p := testPolicy(t)
+	for _, tt := range []struct{ name, user, repo, reason string }{
+		{"enabled", "rpi01-agent", "bolaum/ghgw", "the push has 1000000 ref updates, more than the 1000 allowed; push fewer refs at a time"},
+		{"unknown", "ghost", "bolaum/ghgw", "unknown user ghost; ask the admin to create it"},
+		{"disabled", "old-agent", "bolaum/ghgw", "user old-agent is disabled; ask the admin to enable it"},
+		{"ungranted", "rpi01-agent", "acme/secret", "rpi01-agent cannot access acme/secret. Repositories allowed: bolaum/*, nocred/app"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := Request{User: tt.user, Repo: mustRepo(t, tt.repo), Op: Push{DefaultBranch: "main", Updates: updates}}
+			var d Decision
+			if got := allocated(func() { d = p.Decide(req) }); got > 64<<10 {
+				t.Errorf("Decide allocated %d bytes, want at most 64 KiB", got)
+			}
+			if d.Allowed || d.Reason != tt.reason || d.Refs != nil {
+				t.Errorf("Decide() = %q with %d refs, want %q with none", d.Reason, len(d.Refs), tt.reason)
+			}
+		})
+	}
+}
+
+// TestOversizedIdentifiers feeds identifiers of 4 MiB with control bytes to every parser and to
+// Decide: each message (each line of a joined error) stays small and printable.
+func TestOversizedIdentifiers(t *testing.T) {
+	huge := strings.Repeat("x", 4<<20) + "\n\x1b[2J"
+	check := func(t *testing.T, what, msg string) {
+		t.Helper()
+		for line := range strings.SplitSeq(msg, "\n") {
+			if len(line) > 3*MaxRefNameLen || strings.ContainsFunc(line, func(c rune) bool { return !unicode.IsPrint(c) }) {
+				t.Errorf("%s: message of %d bytes, want it small and printable: %.200q", what, len(line), line)
+			}
+		}
+	}
+	errMsg := func(err error) string {
+		if err == nil {
+			return "no error"
+		}
+		return err.Error()
+	}
+	_, err := ParseRepo("o/" + huge)
+	check(t, "ParseRepo name", errMsg(err))
+	_, err = ParseRepo(huge + "/x")
+	check(t, "ParseRepo owner", errMsg(err))
+	_, err = ParseRepoGlob("o/" + huge)
+	check(t, "ParseRepoGlob", errMsg(err))
+	_, err = ParseBranchGlob(huge)
+	check(t, "ParseBranchGlob", errMsg(err))
+	_, err = NewPolicy(State{Users: []User{{Name: huge}}, Groups: []Group{{Name: "g", Members: []string{huge}}}, Owners: []string{huge}}, nil)
+	check(t, "NewPolicy", errMsg(err))
+	_, err = NewRESTTable([]RESTOperation{{Name: huge, Method: "GET", Path: "/meta", Class: ClassGlobal}, {Name: "a.b", Method: huge, Path: huge, Class: ClassRead}})
+	check(t, "NewRESTTable", errMsg(err))
+
+	p := testPolicy(t)
+	d := p.Decide(Request{User: "rpi01-agent", Repo: mustRepo(t, "bolaum/ghgw"), Op: REST{Name: huge}})
+	check(t, "unknown operation", d.Reason)
+	d = p.Decide(Request{User: huge, Repo: mustRepo(t, "bolaum/ghgw"), Op: Fetch{}})
+	check(t, "unknown user", d.Reason)
+}
+
+func TestBoundedList(t *testing.T) {
+	long := strings.Repeat("a", 400)
+	tests := []struct {
+		name  string
+		items []string
+		want  string
+	}{
+		{"none", nil, "none"},
+		{"fits", []string{"a", "b"}, "a, b"},
+		{"cut", []string{long, long, long, long}, long + ", " + long + " and 2 more"},
+		{"first item always shown", []string{strings.Repeat("b", 1000), long}, strings.Repeat("b", 1000) + " and 1 more"},
+		{"items are rendered", []string{"a\nb"}, `"a\nb"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := boundedList(tt.items); got != tt.want {
+				t.Errorf("boundedList() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }

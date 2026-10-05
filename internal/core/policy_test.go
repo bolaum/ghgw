@@ -93,7 +93,7 @@ func TestNewPolicyValidation(t *testing.T) {
 					Owners: []string{"-acme"},
 				}
 			},
-			wantErr: []string{`user name "Agent"`, `user name ""`, `group name "my group"`, `owner "-acme"`},
+			wantErr: []string{`user name Agent `, `user name ""`, `group name my group `, `owner -acme `},
 		},
 		{
 			name: "duplicates",
@@ -157,10 +157,10 @@ func TestNewPolicyValidation(t *testing.T) {
 				"grant 2 of group ghosts: group ghosts does not exist; create it first",
 				"grant 3 of user rpi01-agent: needs at least one repository pattern",
 				"grant 4 of user rpi01-agent: has an empty repository pattern",
-				`grant 5 of user rpi01-agent: access must be read or write, not "admin"`,
+				"grant 5 of user rpi01-agent: access must be read or write, not admin",
 				`grant 6 of user rpi01-agent: access must be read or write, not ""`,
 				"grant 7 of user rpi01-agent: push branches need access write",
-				`grant 8 of user rpi01-agent: api must be read or pr (or empty for none), not "admin"`,
+				"grant 8 of user rpi01-agent: api must be read or pr (or empty for none), not admin",
 				"grant 9 of user rpi01-agent: has an empty push pattern",
 				"grant 10 of holder rpi01-agent: the holder must be a user or a group",
 			},
@@ -176,6 +176,33 @@ func TestNewPolicyValidation(t *testing.T) {
 				return
 			}
 			checkErrorLines(t, err, tt.wantErr)
+			if p != nil {
+				t.Errorf("NewPolicy() returned a policy with an error")
+			}
 		})
 	}
+}
+
+// TestUserAndGroupNamespaces gives a user and a group the same name: their grants stay apart.
+func TestUserAndGroupNamespaces(t *testing.T) {
+	p, err := NewPolicy(State{
+		Users:  []User{{Name: "agents"}, {Name: "u"}},
+		Groups: []Group{{Name: "agents", Members: []string{"u"}}},
+		Grants: []Grant{
+			grant(t, 1, "user agents", []string{"o/private"}, AccessRead, nil, PresetNone),
+			grant(t, 2, "group agents", []string{"o/shared"}, AccessRead, nil, PresetNone),
+		},
+		Owners: []string{"o"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDecideTests(t, p, []decideTest{
+		{name: "user grant", user: "agents", repo: "o/private", op: Fetch{}, want: allowedBy(1, "user agents")},
+		{name: "group grant", user: "u", repo: "o/shared", op: Fetch{}, want: allowedBy(2, "group agents")},
+		{name: "member does not get the user's grant", user: "u", repo: "o/private", op: Fetch{},
+			want: result{Reason: "u cannot access o/private. Repositories allowed: o/shared"}},
+		{name: "user does not get the group's grant", user: "agents", repo: "o/shared", op: Fetch{},
+			want: result{Reason: "agents cannot access o/shared. Repositories allowed: o/private"}},
+	})
 }
