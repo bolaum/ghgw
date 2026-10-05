@@ -123,7 +123,8 @@ key.
 - `GET /<owner>/<repo>.git/info/refs?service=git-upload-pack|git-receive-pack`,
   `POST /<owner>/<repo>.git/git-upload-pack`, `POST /<owner>/<repo>.git/git-receive-pack`
   (the `.git` suffix is optional, as on GitHub; repository names ending in `.git` are therefore
-  rejected, so `/o/x.git` always means repository `x`).
+  rejected, so `/o/x.git` always means repository `x`). Names ending in `.wiki` are rejected too:
+  GitHub serves the wiki of `x` as `x.wiki`, which a grant on `x.wiki` must not reach.
 - The path is parsed once, with the name rules of `core`: owners and repositories are letters,
   digits, `-` and `_` (and `.` in repository names), which leave nothing to escape, so a path sent
   with any `%`-escape is rejected rather than decoded into another one. The ref advertisement is a
@@ -305,8 +306,8 @@ does not have.
 - A grant has at most 100 repository patterns and 100 push patterns.
 - Repository patterns are `owner/name` globs (`bolaum/*`, `acme/app`). The owner is literal, so a
   grant never reaches an owner the admin did not name. In the name, `*` matches any run of
-  characters (`acme/agent-*`); `**` is rejected, and so is a name ending in `.git`. Owners and
-  names match case-insensitively, like GitHub.
+  characters (`acme/agent-*`); `**` is rejected, and so is a name ending in `.git` or `.wiki`.
+  Owners and names match case-insensitively, like GitHub.
 - Branch globs (`push`) match branch names without `refs/heads/` and support a subset of GitHub's
   branch filter patterns, with the same meaning: literals, `*` (any run of characters except `/`)
   and `**` (any run, `/` included); `agent/**` matches `agent/x` and `agent/x/y`, not `agent`.

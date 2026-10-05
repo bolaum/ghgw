@@ -44,6 +44,10 @@ func TestParseRepo(t *testing.T) {
 		{in: "bolaum/x.GIT", wantErr: "without the .git suffix"},
 		{in: "bolaum/.git", wantErr: "without the .git suffix"},
 		{in: "bolaum/x.github"},
+		// GitHub serves the wiki of x as x.wiki, which a grant on x.wiki must not reach.
+		{in: "bolaum/x.wiki", wantErr: "names ending in .wiki are GitHub wikis"},
+		{in: "bolaum/x.WIKI", wantErr: "names ending in .wiki are GitHub wikis"},
+		{in: "bolaum/x.wikis"},
 		// Look-alikes, encodings and separators never reach policy matching.
 		{in: "bolaum/K", wantErr: "name must be"},      // Kelvin sign, folds to k
 		{in: "Kcme/x", wantErr: "owner"},               // Kelvin sign, folds to k

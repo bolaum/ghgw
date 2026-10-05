@@ -32,6 +32,7 @@ func TestParseGitRequest(t *testing.T) {
 			want: gitRequest{service: uploadPack}, wantRepo: "bolaum/a.b_c-d"},
 
 		{name: "name ending in .git twice", method: "GET", target: "/bolaum/x.git.git/info/refs?service=git-upload-pack", wantStatus: 404},
+		{name: "wiki", method: "GET", target: "/bolaum/ghgw.wiki.git/info/refs?service=git-upload-pack", wantStatus: 404},
 		{name: "only .git", method: "GET", target: "/bolaum/.git/info/refs?service=git-upload-pack", wantStatus: 404},
 		{name: "dot dot", method: "GET", target: "/bolaum/../info/refs?service=git-upload-pack", wantStatus: 404},
 		{name: "dot", method: "POST", target: "/bolaum/./git-upload-pack", wantStatus: 404},

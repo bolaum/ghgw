@@ -50,6 +50,8 @@ func TestRepoGlob(t *testing.T) {
 		{glob: "Bad Owner/x", wantErr: "owner"},
 		{glob: "bolaum/x.git", wantErr: "without the .git suffix"},
 		{glob: "bolaum/*.GIT", wantErr: "without the .git suffix"},
+		{glob: "bolaum/x.wiki", wantErr: "names ending in .wiki are GitHub wikis"},
+		{glob: "bolaum/*.Wiki", wantErr: "names ending in .wiki are GitHub wikis"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.glob, func(t *testing.T) {

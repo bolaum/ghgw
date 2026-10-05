@@ -15,7 +15,7 @@ import (
 //   - The name may contain '*', which matches any run of characters, empty included ("bolaum/*",
 //     "acme/agent-*"). "**" is rejected: names have no '/', so it would only mean '*'.
 //   - Both parts match case-insensitively, like GitHub.
-//   - The name cannot end in ".git" (see ParseRepo).
+//   - The name cannot end in ".git" or ".wiki" (see ParseRepo).
 //
 // The zero RepoGlob matches nothing.
 type RepoGlob struct {
@@ -45,6 +45,9 @@ func ParseRepoGlob(s string) (RepoGlob, error) {
 	}
 	if hasGitSuffix(name) {
 		return RepoGlob{}, fmt.Errorf("repository pattern %s: write the name without the .git suffix", Printable(s))
+	}
+	if hasWikiSuffix(name) {
+		return RepoGlob{}, fmt.Errorf("repository pattern %s: names ending in .wiki are GitHub wikis, which ghgw does not serve", Printable(s))
 	}
 	re, err := compileGlob(name, "(?i)", ".*")
 	if err != nil {
