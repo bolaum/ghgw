@@ -171,6 +171,37 @@ func TestParseErrors(t *testing.T) {
 			want: []string{"grant 1 of user agent: push branches need access write"},
 		},
 		{
+			name: "every problem of a grant",
+			data: user("    grants:\n      - {id: 1, repos: ['*/x', 'a/**'], access: wrte, push: ['refs/heads/x'], api: wrong}\n"),
+			want: []string{
+				"grant 1 of user agent: repository pattern */x",
+				"grant 1 of user agent: repository pattern a/**",
+				"grant 1 of user agent: branch pattern refs/heads/x",
+				"grant 1 of user agent: access must be read or write, not wrte",
+				"grant 1 of user agent: api must be read or pr (or empty for none), not wrong",
+			},
+		},
+		{
+			name: "grant without id and with other problems",
+			data: user("    grants:\n      - {repos: ['*/x'], access: read}\n"),
+			want: []string{"user agent: grant 1 in the list has no id", "grant 0 of user agent: repository pattern */x"},
+		},
+		{
+			name: "negative id",
+			data: user("    grants:\n      - {id: -2, repos: [a/b], access: read}\n"),
+			want: []string{"user agent: grant 1 in the list has id -2; give it a positive one"},
+		},
+		{
+			name: "key hash that is not a string",
+			data: "users:\n  agent:\n    key_hash: [" + hashA + "]\n",
+			want: []string{"user agent: key_hash must be sha256: and 64 hex characters"},
+		},
+		{
+			name: "null key hash",
+			data: "users:\n  agent:\n    key_hash: ~\n",
+			want: []string{"user agent: no key_hash"},
+		},
+		{
 			name: "bad access and api",
 			data: user("    grants:\n      - {id: 1, repos: [a/b], access: wrte}\n      - {id: 2, repos: [a/b], access: read, api: none}\n"),
 			want: []string{"access must be read or write, not wrte", "api must be read or pr (or empty for none), not none"},
@@ -206,7 +237,11 @@ func TestParseErrors(t *testing.T) {
 
 func TestParseErrorsDoNotQuoteKeys(t *testing.T) {
 	key := "ghgw_" + strings.Repeat("c", 64)
-	for _, value := range []string{key, "sha256:" + key, "github_pat_" + strings.Repeat("x", 40)} {
+	for _, value := range []string{
+		key, "sha256:" + key, "github_pat_" + strings.Repeat("x", 40),
+		"!!int " + key, "!!bool " + key, "!!timestamp " + key, "!!float " + key, "!!binary " + key,
+		"[" + key + "]", "{k: " + key + "}", "!!int " + hashA,
+	} {
 		_, err := Parse([]byte("users:\n  agent:\n    key_hash: " + value + "\n"))
 		if err == nil {
 			t.Fatalf("Parse(key_hash: %s...) error = nil", value[:8])

@@ -41,10 +41,12 @@ type (
 		Groups map[string]group `yaml:"groups"`
 	}
 	user struct {
-		KeyHash  string   `yaml:"key_hash"`
-		Disabled bool     `yaml:"disabled"`
-		Groups   []string `yaml:"groups"`
-		Grants   []grant  `yaml:"grants"`
+		// KeyHash is a node, not a string: decoding a tagged value (!!int ghgw_...) into a string
+		// fails with an error that quotes it.
+		KeyHash  yaml.Node `yaml:"key_hash"`
+		Disabled bool      `yaml:"disabled"`
+		Groups   []string  `yaml:"groups"`
+		Grants   []grant   `yaml:"grants"`
 	}
 	group struct {
 		Grants []grant `yaml:"grants"`
@@ -150,38 +152,25 @@ func Parse(data []byte) (*File, error) {
 	return pf, nil
 }
 
-// appendGrants adds the grants of holder to st, and the problems of the ones it cannot parse to
+// appendGrants adds the grants of holder to st, and every problem of the ones that are invalid to
 // errs, which it returns.
 func appendGrants(st *core.State, errs []error, holder core.Holder, grants []grant) []error {
 	for i, g := range grants {
-		if g.ID == 0 {
+		switch {
+		case g.ID == 0:
 			errs = append(errs, fmt.Errorf("%s: grant %d in the list has no id; give it one no other grant has had, since decisions cite it", holder, i+1))
-			continue
+		case g.ID < 0:
+			errs = append(errs, fmt.Errorf("%s: grant %d in the list has id %d; give it a positive one no other grant has had", holder, i+1, g.ID))
 		}
-		cg := core.Grant{ID: g.ID, Holder: holder, Access: core.Access(g.Access), API: core.Preset(g.API)}
-		var err error
-		if cg.Repos, err = parseAll(g.Repos, core.ParseRepoGlob); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", cg, err))
-			continue
+		cg, err := core.ParseGrant(g.ID, holder, g.Repos, core.Access(g.Access), g.Push, core.Preset(g.API))
+		if err != nil {
+			errs = append(errs, err)
 		}
-		if cg.Push, err = parseAll(g.Push, core.ParseBranchGlob); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", cg, err))
-			continue
+		if g.ID > 0 && err == nil {
+			st.Grants = append(st.Grants, cg)
 		}
-		st.Grants = append(st.Grants, cg)
 	}
 	return errs
-}
-
-func parseAll[P any](texts []string, parse func(string) (P, error)) ([]P, error) {
-	ps := make([]P, len(texts))
-	for i, t := range texts {
-		var err error
-		if ps[i], err = parse(t); err != nil {
-			return nil, err
-		}
-	}
-	return ps, nil
 }
 
 // FormatKeyHash returns hash as the policy file writes it.
@@ -190,15 +179,16 @@ func FormatKeyHash(hash []byte) string {
 }
 
 // parseKeyHash parses a key_hash. Its errors never quote the value: it may be a pasted secret.
-func parseKeyHash(s string) ([]byte, error) {
-	if s == "" {
+func parseKeyHash(n yaml.Node) ([]byte, error) {
+	s := n.Value
+	if n.Kind == 0 || n.Kind == yaml.ScalarNode && (s == "" || n.ShortTag() == "!!null") {
 		return nil, errors.New("no key_hash; create a key with ghgw key new and paste the key_hash it prints")
 	}
-	if strings.HasPrefix(s, "ghgw_") {
+	if n.Kind == yaml.ScalarNode && strings.HasPrefix(s, "ghgw_") {
 		return nil, errors.New("key_hash holds a ghgw key, not its hash; that key is exposed in the file now, so create a new one with ghgw key new and paste only its key_hash")
 	}
 	hash, err := hex.DecodeString(strings.TrimPrefix(s, keyHashPrefix))
-	if !strings.HasPrefix(s, keyHashPrefix) || err != nil || len(hash) != sha256.Size {
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!str" || !strings.HasPrefix(s, keyHashPrefix) || err != nil || len(hash) != sha256.Size {
 		return nil, errors.New("key_hash must be sha256: and 64 hex characters, as ghgw key new prints it")
 	}
 	return hash, nil

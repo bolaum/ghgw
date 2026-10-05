@@ -227,10 +227,38 @@ func NewPolicy(s State, rest *RESTTable) (*Policy, error) {
 	return p, nil
 }
 
+// ParseGrant builds a grant from the patterns an admin writes. The error lists every problem the
+// grant has on its own, one per line; NewPolicy checks the ID and what depends on the rest of the
+// policy.
+func ParseGrant(id int, holder Holder, repos []string, access Access, push []string, api Preset) (Grant, error) {
+	g := Grant{ID: id, Holder: holder, Access: access, API: api}
+	var errs []error
+	for _, s := range repos {
+		r, err := ParseRepoGlob(s)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		g.Repos = append(g.Repos, r)
+	}
+	for _, s := range push {
+		b, err := ParseBranchGlob(s)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		g.Push = append(g.Push, b)
+	}
+	// The counts are those written, so a pattern that failed to parse is not also reported missing.
+	errs = append(errs, fieldProblems(g, len(repos), len(push))...)
+	return g, grantErr(g, errs)
+}
+
 func checkGrant(g Grant, users map[string]User, groups map[string][]string) error {
 	if g.ID <= 0 {
 		return fmt.Errorf("grant %d: the ID must be positive", g.ID)
 	}
+	var errs []error
 	var known bool
 	switch g.Holder.Kind {
 	case HolderUser:
@@ -241,40 +269,52 @@ func checkGrant(g Grant, users map[string]User, groups map[string][]string) erro
 		return fmt.Errorf("%s: the holder must be a user or a group", g)
 	}
 	if !known {
-		return fmt.Errorf("%s: %s does not exist; create it first", g, g.Holder)
+		errs = append(errs, fmt.Errorf("%s does not exist; create it first", g.Holder))
 	}
-	if len(g.Repos) == 0 {
-		return fmt.Errorf("%s: needs at least one repository pattern", g)
+	errs = append(errs, fieldProblems(g, len(g.Repos), len(g.Push))...)
+	if slices.ContainsFunc(g.Repos, func(r RepoGlob) bool { return r.name == nil }) {
+		errs = append(errs, errors.New("has an empty repository pattern"))
 	}
-	if len(g.Repos) > MaxGrantPatterns {
-		return fmt.Errorf("%s: has %d repository patterns; a grant has at most %d", g, len(g.Repos), MaxGrantPatterns)
+	if slices.ContainsFunc(g.Push, func(b BranchGlob) bool { return b.re == nil }) {
+		errs = append(errs, errors.New("has an empty push pattern"))
 	}
-	for _, r := range g.Repos {
-		if r.name == nil {
-			return fmt.Errorf("%s: has an empty repository pattern", g)
-		}
+	return grantErr(g, errs)
+}
+
+// fieldProblems returns the problems of g's fields, for a grant written with repos repository
+// patterns and push push patterns.
+func fieldProblems(g Grant, repos, push int) []error {
+	var errs []error
+	switch {
+	case repos == 0:
+		errs = append(errs, errors.New("needs at least one repository pattern"))
+	case repos > MaxGrantPatterns:
+		errs = append(errs, fmt.Errorf("has %d repository patterns; a grant has at most %d", repos, MaxGrantPatterns))
 	}
 	switch g.Access {
 	case AccessRead:
-		if len(g.Push) > 0 {
-			return fmt.Errorf("%s: push branches need access write", g)
+		if push > 0 {
+			errs = append(errs, errors.New("push branches need access write"))
 		}
 	case AccessWrite:
 	default:
-		return fmt.Errorf("%s: access must be read or write, not %s", g, Printable(string(g.Access)))
+		errs = append(errs, fmt.Errorf("access must be read or write, not %s", Printable(string(g.Access))))
 	}
-	if len(g.Push) > MaxGrantPatterns {
-		return fmt.Errorf("%s: has %d push patterns; a grant has at most %d", g, len(g.Push), MaxGrantPatterns)
-	}
-	for _, b := range g.Push {
-		if b.re == nil {
-			return fmt.Errorf("%s: has an empty push pattern", g)
-		}
+	if push > MaxGrantPatterns {
+		errs = append(errs, fmt.Errorf("has %d push patterns; a grant has at most %d", push, MaxGrantPatterns))
 	}
 	switch g.API {
 	case PresetNone, PresetRead, PresetPR:
 	default:
-		return fmt.Errorf("%s: api must be read or pr (or empty for none), not %s", g, Printable(string(g.API)))
+		errs = append(errs, fmt.Errorf("api must be read or pr (or empty for none), not %s", Printable(string(g.API))))
 	}
-	return nil
+	return errs
+}
+
+// grantErr joins errs, each prefixed with the grant ("grant 2 of group agents: ...").
+func grantErr(g Grant, errs []error) error {
+	for i, err := range errs {
+		errs[i] = fmt.Errorf("%s: %w", g, err)
+	}
+	return errors.Join(errs...)
 }
